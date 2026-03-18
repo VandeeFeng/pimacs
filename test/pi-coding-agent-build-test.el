@@ -17,7 +17,7 @@
   "Read dependency versions from the package header, excluding Emacs itself."
   (should (equal '((transient . (0 9 0))
                    (md-ts-mode . (0 3 0))
-                   (markdown-table-wrap . (0 1 0)))
+                   (markdown-table-wrap . (0 2 0)))
                  (pi-coding-agent-build-package-requirements))))
 
 (ert-deftest pi-coding-agent-test-build-package-requirements-fallback-without-lm-package-requires ()
