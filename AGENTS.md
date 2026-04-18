@@ -56,6 +56,7 @@ module, direct `setq` is fine.
 | `test/pi-coding-agent-render-test.el` | Response display, tools, diffs |
 | `test/pi-coding-agent-table-test.el` | Table decoration, overlays, streaming, resize |
 | `test/pi-coding-agent-input-test.el` | History, send/abort, queuing, completion |
+| `test/pi-coding-agent-extension-test.el` | Extension features: insert-region, active input resolution, @agent mention completion |
 | `test/pi-coding-agent-menu-test.el` | Session management, transient menu, reconnect |
 | `test/pi-coding-agent-build-test.el` | Batch helper scripts for dependency and grammar installation |
 | `test/pi-coding-agent-test.el` | Entry point / cross-module integration |
@@ -96,6 +97,7 @@ make test-core
 make test-ui
 make test-render
 make test-input
+make test-extension
 make test-menu
 make test-build
 ```

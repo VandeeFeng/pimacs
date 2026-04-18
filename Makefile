@@ -19,7 +19,7 @@ SELECTOR ?=
 # Example: make test VERBOSE=1
 VERBOSE ?=
 
-.PHONY: test test-unit test-core test-ui test-render test-table test-input test-menu test-build
+.PHONY: test test-unit test-core test-ui test-render test-table test-input test-extension test-menu test-build
 .PHONY: test-integration test-integration-fake test-integration-real test-integration-ci test-integration-ci-real test-gui test-gui-ci test-all
 .PHONY: bench bench-batch
 .PHONY: check check-parens compile lint lint-checkdoc lint-package clean clean-cache help
@@ -33,6 +33,7 @@ help:
 	@echo "  make test-render      Render tests only"
 	@echo "  make test-table       Table decoration tests only"
 	@echo "  make test-input       Input buffer tests only"
+	@echo "  make test-extension   Extension tests only"
 	@echo "  make test-menu        Menu/session tests only"
 	@echo "  make test-build       Build/dependency helper tests only"
 	@echo "  make test-unit        Compile + all unit tests"
@@ -91,6 +92,7 @@ test: .deps-stamp
 		-l pi-coding-agent-render-test \
 		-l pi-coding-agent-table-test \
 		-l pi-coding-agent-input-test \
+		-l pi-coding-agent-extension-test \
 		-l pi-coding-agent-menu-test \
 		-l pi-coding-agent-build-test \
 		-l pi-coding-agent-fake-pi-test \
@@ -125,6 +127,8 @@ test-table: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-table-test -f ert-run-tests-batch-and-exit
 test-input: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-input-test -f ert-run-tests-batch-and-exit
+test-extension: .deps-stamp
+	@$(BATCH_TEST) -l pi-coding-agent-extension-test -f ert-run-tests-batch-and-exit
 test-menu: .deps-stamp
 	@$(BATCH_TEST) -l pi-coding-agent-menu-test -f ert-run-tests-batch-and-exit
 

@@ -253,6 +253,7 @@ markdown highlighting while preserving mode identity and keybindings."
   ;; input buffer should only offer slash commands, file refs, and paths.
   (setq-local completion-at-point-functions nil)
   (add-hook 'completion-at-point-functions #'pi-coding-agent--command-capf nil t)
+  (add-hook 'completion-at-point-functions #'pi-coding-agent--mention-capf nil t)
   (add-hook 'completion-at-point-functions #'pi-coding-agent--file-reference-capf nil t)
   (add-hook 'completion-at-point-functions #'pi-coding-agent--path-capf nil t)
   (add-hook 'post-self-insert-hook #'pi-coding-agent--maybe-complete-at nil t)
@@ -404,7 +405,7 @@ Called from `post-self-insert-hook'.
 Does not trigger when @ follows alphanumeric (e.g., in email addresses)."
   (when (and (eq last-command-event ?@)
              (pi-coding-agent--at-trigger-p))
-    (run-at-time 0 nil #'pi-coding-agent--complete-file-reference)))
+    (run-at-time 0 nil #'pi-coding-agent--complete-mention)))
 
 (defun pi-coding-agent--complete-file-reference ()
   "Complete file reference after @."

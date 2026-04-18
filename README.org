@@ -213,7 +213,7 @@ For multiple sessions in the same directory, use
 | =M-p= / =M-n= | input   | History navigation                |
 | =C-r=         | input   | Incremental history search        |
 | =TAB=         | input   | Complete paths, @files, /commands |
-| =@=           | input   | File reference (search)           |
+| =@=           | input   | Agent or file reference           |
 | =n= / =p=     | chat    | Navigate messages                 |
 | =TAB=         | chat    | Toggle section                    |
 | =S-TAB=       | chat    | Cycle all folds                   |

@@ -23,12 +23,13 @@
 
 (require 'pi-coding-agent-ui)
 (require 'cl-lib)
+(require 'seq)
 (require 'subr-x)
 
 ;;; Extension: insert-region
 ;; File-centric helpers for pi-coding-agent.
 ;;
-;; This module currently provides one user command:
+;; This extension provides one user command:
 ;;   `pi-coding-agent-insert-region'
 ;;
 ;; It inserts the active file region into the current pi input buffer and
@@ -163,6 +164,216 @@ an abbreviated absolute path."
 ;; Global shortcut: allow inserting selected file regions directly
 ;; from source buffers without switching back to pi input first.
 (define-key global-map (kbd "C-c C-a") #'pi-coding-agent-insert-region)
+
+;;; Extension: @agent mention support
+;; Mention helpers for pi-coding-agent input.
+;;
+;; Agent definitions are discovered in pi's default order:
+;; - ~/.pi/agent/agents
+;; - nearest ancestor .pi/agents from cwd
+;;
+;; The actual @agent execution semantics still live on the pi side; this
+;; extension layer only handles editor-side discovery and completion.
+
+(defconst pi-coding-agent--agent-file-extension ".md"
+  "Filename extension for agent definitions.")
+
+(defconst pi-coding-agent--project-agents-dir ".pi/agents"
+  "Project-relative directory containing agent definitions.")
+
+(defconst pi-coding-agent--mention-completion-metadata
+  '(metadata
+    (display-sort-function . identity)
+    (cycle-sort-function . identity))
+  "Metadata for mention completion tables that must preserve candidate order.")
+
+(defun pi-coding-agent--agent-user-directory ()
+  "Return the user agent directory."
+  (expand-file-name "~/.pi/agent/agents"))
+
+(defun pi-coding-agent--agent-project-directory (&optional directory)
+  "Return nearest project agent directory from DIRECTORY, or nil.
+Matches pi's subagent discovery by walking upward and checking
+`<dir>/.pi/agents' at each level."
+  (when-let* ((start-dir (or directory (pi-coding-agent--session-directory)))
+              (project-root (locate-dominating-file start-dir
+                                                    pi-coding-agent--project-agents-dir)))
+    (expand-file-name pi-coding-agent--project-agents-dir project-root)))
+
+(defun pi-coding-agent--agent-frontmatter-value (header key)
+  "Return string value for KEY from frontmatter HEADER, or nil."
+  (when (string-match (format "^%s:[[:space:]]*\\(.+\\)$" (regexp-quote key)) header)
+    (string-trim (string-trim (match-string 1 header)) "\"" "\"")))
+
+(defun pi-coding-agent--parse-agent-file (file)
+  "Return agent plist parsed from FILE, or nil."
+  (when (file-readable-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (when (looking-at-p "---[[:space:]]*$")
+        (forward-line 1)
+        (let ((header-start (point)))
+          (when (re-search-forward "^---[[:space:]]*$" nil t)
+            (let* ((header (buffer-substring-no-properties header-start (match-beginning 0)))
+                   (name (pi-coding-agent--agent-frontmatter-value header "name"))
+                   (description (pi-coding-agent--agent-frontmatter-value header "description")))
+              (when (and name description)
+                (list :name (string-remove-prefix "@" name)
+                      :description description
+                      :file file)))))))))
+
+(defun pi-coding-agent--load-agents-from-directory (directory source)
+  "Return agent plists loaded from DIRECTORY with SOURCE.
+SOURCE is recorded as either `user' or `project'."
+  (when (file-directory-p directory)
+    (delq nil
+          (mapcar
+           (lambda (file)
+             (when-let* ((agent (pi-coding-agent--parse-agent-file file)))
+               (plist-put agent :source source)))
+           (directory-files directory t
+                            (concat (regexp-quote pi-coding-agent--agent-file-extension) "\\'")
+                            t)))))
+
+(defun pi-coding-agent--discover-agents (&optional directory)
+  "Return available agents for DIRECTORY.
+Project agents override user agents with the same name."
+  (let ((agents (make-hash-table :test 'equal)))
+    (dolist (agent (pi-coding-agent--load-agents-from-directory
+                    (pi-coding-agent--agent-user-directory) 'user))
+      (puthash (plist-get agent :name) agent agents))
+    (when-let* ((project-dir (pi-coding-agent--agent-project-directory directory)))
+      (dolist (agent (pi-coding-agent--load-agents-from-directory project-dir 'project))
+        (puthash (plist-get agent :name) agent agents)))
+    (sort (hash-table-values agents)
+          (lambda (left right)
+            (string-lessp (plist-get left :name)
+                          (plist-get right :name))))))
+
+(defun pi-coding-agent--mention-bounds ()
+  "Return bounds for current @ mention text as (START . END), or nil.
+START is the first character after @."
+  (save-excursion
+    (let ((limit (line-beginning-position))
+          (end (point))
+          start)
+      (while (and (not start) (> (point) limit))
+        (backward-char)
+        (when (eq (char-after) ?@)
+          (let ((prev (char-before)))
+            (when (or (null prev)
+                      (not (string-match-p "[[:alnum:]]" (string prev))))
+              (setq start (1+ (point)))))))
+      (when start
+        (let ((prefix (buffer-substring-no-properties start end)))
+          (unless (string-match-p "[[:space:]]" prefix)
+            (cons start end)))))))
+
+(defun pi-coding-agent--mention-candidates (&optional prefix)
+  "Return completion metadata for @ PREFIX.
+Agents are listed before files."
+  (let* ((query (or prefix ""))
+         (matcher (lambda (text)
+                    (string-match-p (regexp-quote query) text)))
+         (agents (seq-filter
+                  (lambda (agent)
+                    (funcall matcher (plist-get agent :name)))
+                  (pi-coding-agent--discover-agents)))
+         (project-files (pi-coding-agent--get-project-files))
+         (files (if (string-empty-p query)
+                    project-files
+                  (cl-remove-if-not matcher project-files))))
+    (append
+     (mapcar (lambda (agent)
+               (list :candidate (plist-get agent :name)
+                     :display (concat "@" (plist-get agent :name))
+                     :annotation (format "  [agent] %s"
+                                         (plist-get agent :description))
+                     :kind 'function))
+             agents)
+     (mapcar (lambda (file)
+               (list :candidate file
+                     :display file
+                     :annotation " (file)"
+                     :kind 'file))
+             files))))
+
+(defun pi-coding-agent--mention-entry (candidate entries)
+  "Return metadata entry for CANDIDATE from ENTRIES."
+  (seq-find (lambda (entry)
+              (equal (plist-get entry :candidate) candidate))
+            entries))
+
+(defun pi-coding-agent--mention-affixation (candidates entries)
+  "Return affixation tuples for CANDIDATES using ENTRIES."
+  (mapcar (lambda (candidate)
+            (let ((entry (pi-coding-agent--mention-entry candidate entries)))
+              (list candidate
+                    (or (plist-get entry :display) candidate)
+                    (or (plist-get entry :annotation) ""))))
+          candidates))
+
+(defun pi-coding-agent--ordered-completion-table (candidates)
+  "Return a completion table preserving CANDIDATES order."
+  (let ((table
+         (lambda (string pred action)
+           (if (eq action 'metadata)
+               pi-coding-agent--mention-completion-metadata
+             (complete-with-action action candidates string pred)))))
+    (if (fboundp 'completion-table-with-metadata)
+        (completion-table-with-metadata
+         table
+         pi-coding-agent--mention-completion-metadata)
+      table)))
+
+(defun pi-coding-agent--mention-capf ()
+  "Completion-at-point function for @agent and @file references."
+  (when-let* ((bounds (pi-coding-agent--mention-bounds)))
+    (let* ((start (car bounds))
+           (end (cdr bounds))
+           (prefix (buffer-substring-no-properties start end))
+           (entries (pi-coding-agent--mention-candidates prefix))
+           (candidates (mapcar (lambda (entry) (plist-get entry :candidate)) entries)))
+      (when candidates
+        (list start end
+              (pi-coding-agent--ordered-completion-table candidates)
+              :exclusive 'no
+              :annotation-function
+              (lambda (candidate)
+                (plist-get (pi-coding-agent--mention-entry candidate entries)
+                           :annotation))
+              :affixation-function
+              (lambda (items)
+                (pi-coding-agent--mention-affixation items entries))
+              :company-kind
+              (lambda (candidate)
+                (plist-get (pi-coding-agent--mention-entry candidate entries)
+                           :kind)))))))
+
+(defun pi-coding-agent--complete-mention ()
+  "Prompt for an @agent or @file completion at point."
+  (interactive)
+  (when-let* ((bounds (pi-coding-agent--mention-bounds)))
+    (let* ((start (car bounds))
+           (end (cdr bounds))
+           (prefix (buffer-substring-no-properties start end))
+           (entries (pi-coding-agent--mention-candidates prefix)))
+      (when entries
+        (let* ((choices
+                (mapcar (lambda (entry)
+                          (cons (format "%s%s"
+                                        (plist-get entry :display)
+                                        (plist-get entry :annotation))
+                                (plist-get entry :candidate)))
+                        entries))
+               (choice (completing-read
+                        "Mention: "
+                        (pi-coding-agent--ordered-completion-table (mapcar #'car choices))
+                        nil t prefix)))
+          (when-let* ((value (cdr (assoc choice choices))))
+            (delete-region start end)
+            (insert value)))))))
 
 (provide 'pi-coding-agent-extension)
 ;;; pi-coding-agent-extension.el ends here
