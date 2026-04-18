@@ -206,6 +206,7 @@ For multiple sessions in the same directory, use
 |---------------+---------+-----------------------------------|
 | =C-c C-c=     | input   | Send (queues if busy)             |
 | =C-c C-s=     | input   | Queue steering message (busy only)|
+| =C-c C-a=     | global  | Insert active file region         |
 | =C-c C-k=     | input   | Abort streaming                   |
 | =C-c C-p=     | both    | Open menu                         |
 | =C-c C-r=     | input   | Resume session                    |
@@ -241,6 +242,10 @@ and skills from =~/.agents/skills/=.
 Several features match the TUI experience:
 
 - *Path completion (Tab)*: Complete relative paths like =./=, =../=, =~/=.
+
+- *Insert file region into input*: Select a region in a file, run
+  =M-x pi-coding-agent-insert-region (C-c C-a)=, and pi input gets:
+  =@file#L1-L3= + the selected text in a fenced code block.
 
 - *Message queuing*: Submit messages while the agent is working:
   - =C-c C-c= queues a /follow-up/ message, delivered after the agent finishes

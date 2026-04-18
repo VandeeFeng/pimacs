@@ -68,6 +68,9 @@
 (declare-function pi-coding-agent-queue-steering "pi-coding-agent-input")
 (declare-function pi-coding-agent-input-mode "pi-coding-agent-input")
 
+;; pi-coding-agent-extension.el (pi-coding-agent extension)
+(declare-function pi-coding-agent-insert-region "pi-coding-agent-extension")
+
 ;; pi-coding-agent-menu.el (menu and session commands)
 (declare-function pi-coding-agent-menu "pi-coding-agent-menu")
 (declare-function pi-coding-agent-resume-session "pi-coding-agent-menu")
@@ -786,7 +789,8 @@ In input buffers, also store BUFFER in `other-window-scroll-buffer'
 so built-in other-window scrolling commands target the linked chat."
   (setq pi-coding-agent--chat-buffer buffer)
   (when (derived-mode-p 'pi-coding-agent-input-mode)
-    (setq-local other-window-scroll-buffer buffer)))
+    (setq-local other-window-scroll-buffer buffer)
+    (pi-coding-agent--set-active-input-buffer (current-buffer))))
 
 (defvar-local pi-coding-agent--input-buffer nil
   "Reference to the input buffer for this session.")
@@ -1132,7 +1136,8 @@ selected input window, then the tallest input window."
 (defun pi-coding-agent--focus-input-window (chat-buf input-buf)
   "Select a visible INPUT-BUF window for the CHAT-BUF session."
   (when-let* ((win (pi-coding-agent--best-input-window chat-buf input-buf)))
-    (select-window win)))
+    (select-window win)
+    (pi-coding-agent--set-active-input-buffer input-buf)))
 
 (defun pi-coding-agent--display-buffers (chat-buf input-buf)
   "Ensure CHAT-BUF and INPUT-BUF are visible.
@@ -1164,7 +1169,8 @@ larger window when the selected one cannot be split."
         ;; value still allows `switch-to-buffer' and `C-x o'.
         (set-window-dedicated-p input-win 'side)))
     (when (window-live-p input-win)
-      (select-window input-win))))
+      (select-window input-win)
+      (pi-coding-agent--set-active-input-buffer input-buf))))
 
 ;;; Scroll Behavior
 ;;

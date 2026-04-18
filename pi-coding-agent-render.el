@@ -41,6 +41,7 @@
 ;;; Code:
 
 (require 'pi-coding-agent-ui)
+(require 'pi-coding-agent-extension)
 (require 'pi-coding-agent-table)
 (require 'cl-lib)
 (require 'ansi-color)
@@ -647,6 +648,8 @@ Note: This runs from `kill-buffer-hook', which executes AFTER the kill
 decision is made.  For proper cancellation support, use `pi-coding-agent-quit'
 which asks upfront before any buffers are touched."
   (when (derived-mode-p 'pi-coding-agent-input-mode)
+    (when (eq (current-buffer) (pi-coding-agent--get-active-input-buffer))
+      (pi-coding-agent--set-active-input-buffer nil))
     (when (and pi-coding-agent--chat-buffer (buffer-live-p pi-coding-agent--chat-buffer))
       (let* ((chat-buf pi-coding-agent--chat-buffer)
              (proc (buffer-local-value 'pi-coding-agent--process chat-buf)))

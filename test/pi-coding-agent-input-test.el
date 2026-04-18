@@ -569,6 +569,137 @@ correct position in the conversation."
     ;; C-c C-c handles follow-up when streaming (no separate C-c C-q)
     (should (eq (key-binding (kbd "C-c C-c")) 'pi-coding-agent-send))))
 
+(ert-deftest pi-coding-agent-test-insert-region-has-global-keybinding ()
+  "C-c C-a is globally available in non-pi buffers."
+  (with-temp-buffer
+    (fundamental-mode)
+    (should (eq (key-binding (kbd "C-c C-a")) 'pi-coding-agent-insert-region))))
+
+(defun pi-coding-agent-test--open-snippet-buffer (dir contents)
+  "Create snippet.el in DIR with CONTENTS and return its buffer."
+  (let ((file (expand-file-name "snippet.el" dir)))
+    (write-region contents nil file nil 'silent)
+    (find-file-noselect file)))
+
+(defun pi-coding-agent-test--insert-lines-from-buffer (buffer start-line end-line)
+  "Insert START-LINE..END-LINE from BUFFER using `pi-coding-agent-insert-region'."
+  (with-current-buffer buffer
+    (goto-char (point-min))
+    (forward-line (1- start-line))
+    (set-mark (point))
+    (forward-line (1+ (- end-line start-line)))
+    (activate-mark)
+    (pi-coding-agent-insert-region)))
+
+(ert-deftest pi-coding-agent-test-active-input-buffer-resolves-single-live-input ()
+  "Active input resolution recovers when exactly one input buffer exists."
+  (let ((input-buf (get-buffer-create "*pi-coding-agent-test-single-active*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer input-buf
+            (pi-coding-agent-input-mode))
+          (setq pi-coding-agent--active-input-buffer nil)
+          (should (eq input-buf (pi-coding-agent--get-active-input-buffer))))
+      (setq pi-coding-agent--active-input-buffer nil)
+      (pi-coding-agent-test--kill-live-buffers input-buf))))
+
+(ert-deftest pi-coding-agent-test-active-input-buffer-remains-nil-when-ambiguous ()
+  "Active input resolution stays nil when multiple input buffers exist."
+  (let ((buffers (mapcar #'get-buffer-create
+                         '("*pi-coding-agent-test-ambiguous-a*"
+                           "*pi-coding-agent-test-ambiguous-b*"))))
+    (unwind-protect
+        (progn
+          (dolist (buf buffers)
+            (with-current-buffer buf
+              (pi-coding-agent-input-mode)))
+          (setq pi-coding-agent--active-input-buffer nil)
+          (should-not (pi-coding-agent--get-active-input-buffer)))
+      (setq pi-coding-agent--active-input-buffer nil)
+      (apply #'pi-coding-agent-test--kill-live-buffers buffers))))
+
+(ert-deftest pi-coding-agent-test-insert-region-adds-location-tag ()
+  "Insert selected file region into input with @file#Lx-Ly marker."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-coding-agent-test-region-ref-"))
+         (file-buf nil))
+    (unwind-protect
+        (pi-coding-agent-test-with-mock-session dir
+                                                (setq file-buf (pi-coding-agent-test--open-snippet-buffer
+                                                                dir "line1\nline2\nline3\nline4\n"))
+                                                (let ((input-buf (get-buffer (pi-coding-agent-test--input-buffer-name dir))))
+                                                  (should (buffer-live-p input-buf))
+                                                  (pi-coding-agent--set-active-input-buffer input-buf)
+                                                  (pi-coding-agent-test--insert-lines-from-buffer file-buf 2 3)
+                                                  (let ((language (with-current-buffer file-buf
+                                                                    (file-name-extension buffer-file-name))))
+                                                    (with-current-buffer input-buf
+                                                      (let ((text (buffer-string)))
+                                                        (should (string-match-p "@snippet\\.el#L2-L3" text))
+                                                        (should (string-match-p
+                                                                 (regexp-quote
+                                                                  (format "````%s\nline2\nline3\n````\n"
+                                                                          language))
+                                                                 text)))))))
+      (pi-coding-agent-test--kill-live-buffers file-buf)
+      (delete-directory dir t))))
+
+(ert-deftest pi-coding-agent-test-insert-region-falls-back-to-single-input-buffer ()
+  "Region insertion falls back to the only live input buffer."
+  (let* ((session-dir (pi-coding-agent-test--make-temp-directory
+                       "pi-coding-agent-test-region-fallback-session-"))
+         (source-dir (pi-coding-agent-test--make-temp-directory
+                      "pi-coding-agent-test-region-fallback-source-"))
+         (file-buf nil))
+    (unwind-protect
+        (pi-coding-agent-test-with-mock-session session-dir
+                                                (setq file-buf (pi-coding-agent-test--open-snippet-buffer
+                                                                source-dir "line1\nline2\nline3\n"))
+                                                (let ((input-buf (get-buffer (pi-coding-agent-test--input-buffer-name session-dir))))
+                                                  (should (buffer-live-p input-buf))
+                                                  (pi-coding-agent--set-active-input-buffer nil)
+                                                  (pi-coding-agent-test--insert-lines-from-buffer file-buf 2 3)
+                                                  (let ((language (with-current-buffer file-buf
+                                                                    (file-name-extension buffer-file-name))))
+                                                    (with-current-buffer input-buf
+                                                      (let ((text (buffer-string)))
+                                                        (should (string-match-p "@.*snippet\\.el#L2-L3" text))
+                                                        (should (string-match-p
+                                                                 (regexp-quote
+                                                                  (format "````%s\nline2\nline3\n````\n"
+                                                                          language))
+                                                                 text)))))))
+      (pi-coding-agent-test--kill-live-buffers file-buf)
+      (delete-directory source-dir t)
+      (delete-directory session-dir t))))
+
+(ert-deftest pi-coding-agent-test-insert-region-fails-without-active-input ()
+  "Region insertion errors when no active pi input buffer exists."
+  (let* ((dir (pi-coding-agent-test--make-temp-directory "pi-coding-agent-test-region-no-input-"))
+         (file-buf nil))
+    (unwind-protect
+        (progn
+          (setq file-buf (pi-coding-agent-test--open-snippet-buffer dir "line1\nline2\n"))
+          (pi-coding-agent--set-active-input-buffer nil)
+          (with-current-buffer file-buf
+            (goto-char (point-min))
+            (set-mark (point))
+            (goto-char (point-max))
+            (activate-mark)
+            (should-error (pi-coding-agent-insert-region) :type 'user-error)))
+      (pi-coding-agent-test--kill-live-buffers file-buf)
+      (delete-directory dir t))))
+
+(ert-deftest pi-coding-agent-test-insert-region-requires-file-buffer ()
+  "Region insertion command errors when current buffer has no file."
+  (with-temp-buffer
+    (insert "abc")
+    (transient-mark-mode 1)
+    (goto-char (point-min))
+    (set-mark (point))
+    (goto-char (point-max))
+    (activate-mark)
+    (should-error (pi-coding-agent-insert-region) :type 'user-error)))
+
 (ert-deftest pi-coding-agent-test-queue-handles-rpc-error ()
   "Queue handles RPC error response by showing message to user."
   (let ((chat-buf (get-buffer-create "*pi-coding-agent-test-queue-error*"))

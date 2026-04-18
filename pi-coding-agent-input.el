@@ -230,6 +230,11 @@ For backward search: go to current input (nil index)."
 
 ;;;; Input Mode
 
+(defun pi-coding-agent--mark-input-active ()
+  "Record current input buffer as the globally active pi input."
+  (when (derived-mode-p 'pi-coding-agent-input-mode)
+    (pi-coding-agent--set-active-input-buffer (current-buffer))))
+
 (define-derived-mode pi-coding-agent-input-mode text-mode "Pi-Input"
   "Major mode for composing pi prompts.
 Defaults to plain `text-mode'.  Set
@@ -251,8 +256,10 @@ markdown highlighting while preserving mode identity and keybindings."
   (add-hook 'completion-at-point-functions #'pi-coding-agent--file-reference-capf nil t)
   (add-hook 'completion-at-point-functions #'pi-coding-agent--path-capf nil t)
   (add-hook 'post-self-insert-hook #'pi-coding-agent--maybe-complete-at nil t)
+  (add-hook 'post-command-hook #'pi-coding-agent--mark-input-active nil t)
   (add-hook 'isearch-mode-hook #'pi-coding-agent--history-isearch-setup nil t)
-  (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-input-on-kill nil t))
+  (add-hook 'kill-buffer-hook #'pi-coding-agent--cleanup-input-on-kill nil t)
+  (pi-coding-agent--mark-input-active))
 
 ;;;; Input-Buffer Chat Navigation
 

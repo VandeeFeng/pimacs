@@ -81,6 +81,7 @@
 
 (require 'pi-coding-agent-menu)
 (require 'pi-coding-agent-input)
+(require 'pi-coding-agent-extension)
 
 ;;;; Main Entry Point
 
