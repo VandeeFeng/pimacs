@@ -360,20 +360,24 @@ Agents are listed before files."
            (prefix (buffer-substring-no-properties start end))
            (entries (pi-coding-agent--mention-candidates prefix)))
       (when entries
-        (let* ((choices
-                (mapcar (lambda (entry)
-                          (cons (format "%s%s"
-                                        (plist-get entry :display)
-                                        (plist-get entry :annotation))
-                                (plist-get entry :candidate)))
-                        entries))
+        (let* ((candidates (mapcar (lambda (entry)
+                                     (plist-get entry :candidate))
+                                   entries))
+               (completion-extra-properties
+                `(:annotation-function
+                  ,(lambda (candidate)
+                     (plist-get (pi-coding-agent--mention-entry candidate entries)
+                                :annotation))
+                  :affixation-function
+                  ,(lambda (items)
+                     (pi-coding-agent--mention-affixation items entries))))
                (choice (completing-read
                         "Mention: "
-                        (pi-coding-agent--ordered-completion-table (mapcar #'car choices))
+                        (pi-coding-agent--ordered-completion-table candidates)
                         nil t prefix)))
-          (when-let* ((value (cdr (assoc choice choices))))
+          (when (and choice (not (string-empty-p choice)))
             (delete-region start end)
-            (insert value)))))))
+            (insert choice)))))))
 
 (provide 'pi-coding-agent-extension)
 ;;; pi-coding-agent-extension.el ends here

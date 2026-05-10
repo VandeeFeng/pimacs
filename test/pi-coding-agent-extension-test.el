@@ -41,7 +41,11 @@
                        '(:candidate "service.el" :display "service.el"
                                     :annotation " (file)" :kind file))))
               ((symbol-function 'completing-read)
-               (lambda (&rest _) "@search  [agent] Search docs")))
+               (lambda (_prompt collection &rest _)
+                 (should (member "search" (all-completions "" collection)))
+                 (should-not (member "@search  [agent] Search docs"
+                                     (all-completions "" collection)))
+                 "search")))
       (pi-coding-agent--complete-mention)
       (should (equal (buffer-string) "Ask @search")))))
 
