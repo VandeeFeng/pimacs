@@ -105,6 +105,130 @@ This ensures all files get code fences for consistent display."
     (should (memq #'pi-coding-agent--maybe-refresh-hot-tail-tables
                   window-configuration-change-hook))))
 
+(ert-deftest pi-coding-agent-test-chat-mode-initializes-with-theme-derived-diff-faces ()
+  "Chat mode startup should not depend on diff-mode being loaded elsewhere."
+  (with-temp-buffer
+    (let ((debug-on-error t))
+      (pi-coding-agent-chat-mode)
+      (should (derived-mode-p 'pi-coding-agent-chat-mode)))))
+
+(ert-deftest pi-coding-agent-test-thinking-display-default-is-hidden ()
+  "Package default keeps completed thinking collapsed in new chat buffers."
+  (should (eq (default-value 'pi-coding-agent-thinking-display) 'hidden)))
+
+(ert-deftest pi-coding-agent-test-chat-mode-initializes-thinking-display-from-default ()
+  "New chat buffers inherit the configured completed-thinking display default."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (should (eq pi-coding-agent--thinking-display 'hidden)))))
+
+(ert-deftest pi-coding-agent-test-thinking-display-override-is-buffer-local ()
+  "Changing one chat buffer's thinking display leaves others and the default alone."
+  (let ((pi-coding-agent-thinking-display 'visible)
+        (buf-a (generate-new-buffer " *pi-thinking-display-a*"))
+        (buf-b (generate-new-buffer " *pi-thinking-display-b*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf-a
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent--set-thinking-display 'hidden))
+          (with-current-buffer buf-b
+            (pi-coding-agent-chat-mode))
+          (should (eq pi-coding-agent-thinking-display 'visible))
+          (should (eq (buffer-local-value 'pi-coding-agent--thinking-display buf-a) 'hidden))
+          (should (eq (buffer-local-value 'pi-coding-agent--thinking-display buf-b) 'visible)))
+      (when (buffer-live-p buf-a)
+        (kill-buffer buf-a))
+      (when (buffer-live-p buf-b)
+        (kill-buffer buf-b)))))
+
+(ert-deftest pi-coding-agent-test-theme-diff-background-prefers-diff-face-background ()
+  "Theme-derived diff lines should reuse an existing diff background first."
+  (cl-letf (((symbol-function 'face-background)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added "#224422")
+                 ('default "#111111")
+                 (_ nil))))
+            ((symbol-function 'color-defined-p)
+             (lambda (color) (stringp color))))
+    (should (equal (pi-coding-agent--theme-diff-background
+                    'diff-added 'diff-indicator-added)
+                   "#224422"))))
+
+(ert-deftest pi-coding-agent-test-theme-diff-background-prefers-diff-face-foreground ()
+  "Theme-derived diff lines should prefer the diff face foreground before the indicator."
+  (cl-letf (((symbol-function 'face-background)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added nil)
+                 ('default "#111111")
+                 (_ nil))))
+            ((symbol-function 'face-foreground)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added "#bb3333")
+                 ('diff-indicator-added "#22aa22")
+                 (_ nil))))
+            ((symbol-function 'color-defined-p)
+             (lambda (color) (stringp color))))
+    (should (equal (pi-coding-agent--theme-diff-background
+                    'diff-added 'diff-indicator-added)
+                   (pi-coding-agent--blend-color "#111111" "#bb3333" 0.20)))))
+
+(ert-deftest pi-coding-agent-test-theme-diff-background-falls-back-to-indicator-foreground ()
+  "Theme-derived diff lines should fall back to the indicator color when needed."
+  (cl-letf (((symbol-function 'face-background)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added nil)
+                 ('default "#fefefe")
+                 (_ nil))))
+            ((symbol-function 'face-foreground)
+             (lambda (face &optional _frame _inherit)
+               (pcase face
+                 ('diff-added nil)
+                 ('diff-indicator-added "#22aa22")
+                 (_ nil))))
+            ((symbol-function 'color-defined-p)
+             (lambda (color) (stringp color))))
+    (should (equal (pi-coding-agent--theme-diff-background
+                    'diff-added 'diff-indicator-added)
+                   (pi-coding-agent--blend-color "#fefefe" "#22aa22" 0.10)))))
+
+(ert-deftest pi-coding-agent-test-update-theme-derived-faces-uses-background-only-overlays ()
+  "Theme-derived overlay faces should only contribute background tint."
+  (let (calls)
+    (cl-letf (((symbol-function 'face-background)
+               (lambda (face &optional _frame _inherit)
+                 (pcase face
+                   ('default "#111111")
+                   ('diff-added "#224422")
+                   ('diff-removed nil)
+                   (_ nil))))
+              ((symbol-function 'face-foreground)
+               (lambda (face &optional _frame _inherit)
+                 (pcase face
+                   ('diff-removed "#bb3333")
+                   ('diff-indicator-removed "#aa2222")
+                   (_ nil))))
+              ((symbol-function 'color-defined-p)
+               (lambda (color) (stringp color)))
+              ((symbol-function 'set-face-attribute)
+               (lambda (face _frame &rest args)
+                 (push (cons face args) calls))))
+      (pi-coding-agent--update-theme-derived-faces)
+      (dolist (face '(pi-coding-agent-diff-line-added
+                      pi-coding-agent-diff-line-removed
+                      pi-coding-agent-tool-block-error))
+        (let ((args (cdr (assq face calls))))
+          (should args)
+          (should (eq (plist-get args :inherit) nil))
+          (should (eq (plist-get args :foreground) 'unspecified))
+          (should (stringp (plist-get args :background)))
+          (should (eq (plist-get args :extend) t)))))))
+
 (ert-deftest pi-coding-agent-test-chat-mode-write-file-preserves-chat-state ()
   "`write-file' keeps chat buffers in chat mode with file backing attached."
   (let ((file nil)
@@ -1321,6 +1445,60 @@ Catches wiring bugs like requiring deleted modules."
       (pi-coding-agent--check-dependencies)
       (should essential-called)
       (should optional-called))))
+
+;;; State response
+
+(ert-deftest pi-coding-agent-test-apply-state-response-preserves-extension-ui-warnings-without-session-change ()
+  "Applying state keeps unsupported UI warnings within the same pi session."
+  (let ((chat-buf (generate-new-buffer "*test-state-same-session*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state nil
+                  pi-coding-agent--unsupported-extension-ui-methods-warned
+                  '("setWidget")))
+          (pi-coding-agent--apply-state-response
+           chat-buf
+           '(:success t :data (:isStreaming :false
+                               :sessionId "new-session"
+                               :sessionFile "/tmp/new.jsonl")))
+          (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--unsupported-extension-ui-methods-warned
+                           '("setWidget"))))
+          (with-current-buffer chat-buf
+            (setq pi-coding-agent--unsupported-extension-ui-methods-warned
+                  '("setWidget")))
+          (pi-coding-agent--apply-state-response
+           chat-buf
+           '(:success t :data (:isStreaming :false
+                               :sessionId "new-session"
+                               :sessionFile "/tmp/newer.jsonl")))
+          (with-current-buffer chat-buf
+            (should (equal pi-coding-agent--unsupported-extension-ui-methods-warned
+                           '("setWidget")))))
+      (kill-buffer chat-buf))))
+
+(ert-deftest pi-coding-agent-test-apply-state-response-resets-extension-ui-warnings-on-session-change ()
+  "Applying state clears unsupported UI warnings when the pi session changes."
+  (let ((chat-buf (generate-new-buffer "*test-state-session-change*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat-buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--state '(:session-id "old-session")
+                  pi-coding-agent--unsupported-extension-ui-methods-warned
+                  '("setWidget")))
+          (pi-coding-agent--apply-state-response
+           chat-buf
+           '(:success t :data (:isStreaming :false
+                               :sessionId "new-session"
+                               :sessionFile "/tmp/new.jsonl")))
+          (with-current-buffer chat-buf
+            (should (equal (plist-get pi-coding-agent--state :session-id)
+                           "new-session"))
+            (should (null pi-coding-agent--unsupported-extension-ui-methods-warned))))
+      (kill-buffer chat-buf))))
 
 ;;; Input Window Height (integer and float ratio)
 

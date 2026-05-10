@@ -214,6 +214,167 @@ at most one empty paragraph separator while preserving indentation."
       ""
     (concat "> " (replace-regexp-in-string "\n" "\n> " text))))
 
+(defun pi-coding-agent--thinking-line-count-label (count)
+  "Return COUNT formatted as a singular or plural line label."
+  (format "%d line%s" count (if (= count 1) "" "s")))
+
+(defun pi-coding-agent--thinking-more-lines-label (count)
+  "Return COUNT formatted as a singular or plural hidden-line label."
+  (format "%d more line%s" count (if (= count 1) "" "s")))
+
+(defun pi-coding-agent--thinking-first-content-line (normalized)
+  "Return the first non-empty trimmed line from NORMALIZED, or nil."
+  (catch 'first
+    (dolist (line (split-string normalized "\n" nil))
+      (let ((trimmed (string-trim line)))
+        (unless (string-empty-p trimmed)
+          (throw 'first trimmed))))))
+
+(defun pi-coding-agent--thinking-hidden-stub (normalized)
+  "Return the collapsed completed-thinking stub for NORMALIZED."
+  (let* ((line-count (length (split-string normalized "\n" nil)))
+         (first-line (pi-coding-agent--thinking-first-content-line normalized))
+         (previewable (and pi-coding-agent-thinking-hidden-preview
+                           (> line-count 1)
+                           first-line
+                           (>= (length first-line) 3)
+                           (< (length first-line) 72))))
+    (if previewable
+        (format "> Thinking: %s… (%s)"
+                first-line
+                (pi-coding-agent--thinking-more-lines-label (1- line-count)))
+      (format "> Thinking hidden… (%s)"
+              (pi-coding-agent--thinking-line-count-label line-count)))))
+
+(defun pi-coding-agent--next-thinking-block-order ()
+  "Return the next monotonically increasing completed-thinking block order."
+  (let ((order (or pi-coding-agent--thinking-block-order-counter 0)))
+    (setq pi-coding-agent--thinking-block-order-counter (1+ order))
+    order))
+
+(defun pi-coding-agent--propertize-completed-thinking
+    (rendered order normalized display)
+  "Return RENDERED tagged as completed thinking block metadata.
+ORDER identifies the logical block across rerenders.  NORMALIZED stores the
+canonical completed thinking text, and DISPLAY records whether this block is
+currently shown as `visible' or `hidden'."
+  (propertize rendered
+              'pi-coding-agent-thinking-block order
+              'pi-coding-agent-thinking-normalized normalized
+              'pi-coding-agent-thinking-block-display display
+              'help-echo "TAB: toggle completed thinking"))
+
+(defun pi-coding-agent--apply-completed-thinking-properties
+    (start end order normalized display)
+  "Tag START..END as completed thinking metadata.
+ORDER identifies the block, NORMALIZED stores its canonical text, and DISPLAY
+records whether it is currently shown as `visible' or `hidden'."
+  (when (< start end)
+    (add-text-properties
+     start end
+     `(pi-coding-agent-thinking-block ,order
+       pi-coding-agent-thinking-normalized ,normalized
+       pi-coding-agent-thinking-block-display ,display
+       help-echo "TAB: toggle completed thinking"))))
+
+(defun pi-coding-agent--thinking-block-probe-pos (pos)
+  "Return a position inside the completed-thinking block at POS, or nil.
+Checks POS and the preceding character so point on a block boundary can still
+resolve to the completed thinking block the user was inspecting."
+  (when (> (point-max) (point-min))
+    (let ((probe (cond ((<= pos (point-min)) (point-min))
+                       ((>= pos (point-max)) (max (point-min)
+                                                  (1- (point-max))))
+                       (t pos))))
+      (cond
+       ((get-text-property probe 'pi-coding-agent-thinking-block) probe)
+       ((and (> probe (point-min))
+             (get-text-property (1- probe)
+                                'pi-coding-agent-thinking-block))
+        (1- probe))))))
+
+(defun pi-coding-agent--thinking-block-at-pos (pos)
+  "Return completed-thinking block order at POS, or nil."
+  (when-let* ((probe (pi-coding-agent--thinking-block-probe-pos pos)))
+    (get-text-property probe 'pi-coding-agent-thinking-block)))
+
+(defun pi-coding-agent--thinking-block-start (block-order)
+  "Return the start position of completed thinking BLOCK-ORDER, or nil."
+  (when block-order
+    (text-property-any (point-min) (point-max)
+                       'pi-coding-agent-thinking-block block-order)))
+
+(defun pi-coding-agent--thinking-block-bounds-from-probe (probe)
+  "Return completed-thinking bounds around PROBE, or nil.
+PROBE must already be inside a completed-thinking block."
+  (when (get-text-property probe 'pi-coding-agent-thinking-block)
+    (cons (or (previous-single-property-change
+               (1+ probe)
+               'pi-coding-agent-thinking-block
+               nil
+               (point-min))
+              (point-min))
+          (or (next-single-property-change
+               probe
+               'pi-coding-agent-thinking-block
+               nil
+               (point-max))
+              (point-max)))))
+
+(defun pi-coding-agent--thinking-block-bounds-at-pos (pos)
+  "Return bounds of the completed-thinking block at POS, or nil."
+  (when-let* ((probe (pi-coding-agent--thinking-block-probe-pos pos)))
+    (pi-coding-agent--thinking-block-bounds-from-probe probe)))
+
+(defun pi-coding-agent--thinking-block-metadata-at-pos (pos)
+  "Return completed-thinking block metadata at POS, or nil."
+  (when-let* ((probe (pi-coding-agent--thinking-block-probe-pos pos))
+              (bounds (pi-coding-agent--thinking-block-bounds-from-probe probe))
+              (normalized (get-text-property probe
+                                             'pi-coding-agent-thinking-normalized)))
+    (list :order (get-text-property probe 'pi-coding-agent-thinking-block)
+          :display (or (get-text-property probe
+                                          'pi-coding-agent-thinking-block-display)
+                       'visible)
+          :normalized normalized
+          :start (car bounds)
+          :end (cdr bounds))))
+
+(defun pi-coding-agent--replace-thinking-region (rendered)
+  "Replace the active thinking region with RENDERED text.
+RENDERED should already be the markdown to insert, or an empty string to remove
+an empty placeholder block.  Returns non-nil when the resulting region is
+non-empty."
+  (when (and (markerp pi-coding-agent--thinking-start-marker)
+             (markerp pi-coding-agent--thinking-marker)
+             (marker-position pi-coding-agent--thinking-start-marker)
+             (marker-position pi-coding-agent--thinking-marker))
+    (let* ((start (marker-position pi-coding-agent--thinking-start-marker))
+           (end (marker-position pi-coding-agent--thinking-marker))
+           (text (or rendered ""))
+           (plain-text (substring-no-properties text))
+           (order (and (> (length text) 0)
+                       (get-text-property 0 'pi-coding-agent-thinking-block text)))
+           (normalized (and order
+                            (get-text-property 0
+                                               'pi-coding-agent-thinking-normalized
+                                               text)))
+           (display (and order
+                         (get-text-property 0
+                                            'pi-coding-agent-thinking-block-display
+                                            text))))
+      (when (<= start end)
+        (let ((existing (buffer-substring-no-properties start end)))
+          (if (equal existing plain-text)
+              (when order
+                (pi-coding-agent--apply-completed-thinking-properties
+                 start end order normalized display))
+            (goto-char start)
+            (delete-region start end)
+            (insert text)
+            (set-marker pi-coding-agent--thinking-marker (point))))
+        (not (string-empty-p text))))))
+
 (defun pi-coding-agent--render-thinking-content ()
   "Render normalized accumulated thinking content in place.
 Returns non-nil when meaningful content remains after normalization."
@@ -287,6 +448,21 @@ separated from preceding content."
         pi-coding-agent--thinking-raw nil
         pi-coding-agent--thinking-prev-rendered nil))
 
+(defmacro pi-coding-agent--with-window-rewrite-preservation (&rest body)
+  "Execute BODY and keep chat windows useful after a large rewrite.
+This is for rewrites that can delete the text under `window-start', such as
+collapsing a long thinking block or rebuilding canonical history.  Tail views
+stay at the new tail; non-tail views keep their point and approximate row,
+clamped so the window remains filled when possible."
+  (declare (indent 0) (debug t))
+  `(let ((buffer (current-buffer))
+         (saved-windows (pi-coding-agent--capture-window-rewrite-states))
+         result)
+     (unwind-protect
+         (setq result (progn ,@body))
+       (pi-coding-agent--restore-window-rewrite-states buffer saved-windows))
+     result))
+
 (defun pi-coding-agent--display-thinking-start ()
   "Insert opening marker for thinking block (blockquote)."
   (when pi-coding-agent--streaming-marker
@@ -339,19 +515,42 @@ Normalizes boundary and paragraph whitespace while streaming."
   "End thinking block (blockquote).
 CONTENT is ignored - we use what was already streamed."
   (when pi-coding-agent--streaming-marker
-    (setq pi-coding-agent--in-thinking-block nil)
-    (let ((inhibit-read-only t))
-      (pi-coding-agent--with-scroll-preservation
-        (save-excursion
-          (if (and pi-coding-agent--thinking-start-marker
-                   pi-coding-agent--thinking-marker)
-              (when (pi-coding-agent--render-thinking-content)
-                (goto-char (pi-coding-agent--thinking-insert-position))
-                (pi-coding-agent--ensure-blank-line-separator))
-            ;; Fallback for malformed event streams that skip thinking_start.
-            (goto-char (pi-coding-agent--thinking-insert-position))
-            (pi-coding-agent--ensure-blank-line-separator))
-          (pi-coding-agent--reset-thinking-state))))))
+    (let* ((buffer (current-buffer))
+           (saved-windows (pi-coding-agent--capture-window-rewrite-states))
+           (old-point-max (point-max))
+           (rewrite-start (and (markerp pi-coding-agent--thinking-start-marker)
+                               (marker-position pi-coding-agent--thinking-start-marker)))
+           (rewrite-end (and (markerp pi-coding-agent--thinking-marker)
+                             (marker-position pi-coding-agent--thinking-marker))))
+      (unwind-protect
+          (progn
+            (setq pi-coding-agent--in-thinking-block nil)
+            (let ((inhibit-read-only t))
+              (pi-coding-agent--with-scroll-preservation
+                (save-excursion
+                  (if (and pi-coding-agent--thinking-start-marker
+                           pi-coding-agent--thinking-marker)
+                      (when (pi-coding-agent--replace-thinking-region
+                             (pi-coding-agent--completed-thinking-rendered-text
+                              pi-coding-agent--thinking-raw))
+                        (goto-char (pi-coding-agent--thinking-insert-position))
+                        (pi-coding-agent--ensure-blank-line-separator))
+                    ;; Fallback for malformed event streams that skip thinking_start.
+                    (goto-char (pi-coding-agent--thinking-insert-position))
+                    (pi-coding-agent--ensure-blank-line-separator))
+                  (pi-coding-agent--reset-thinking-state)))))
+        (pi-coding-agent--restore-window-rewrite-states
+         buffer
+         saved-windows
+         (when (and rewrite-start rewrite-end)
+           (let ((replacements
+                  (list (list rewrite-start
+                              rewrite-end
+                              (with-current-buffer buffer
+                                (- (point-max) old-point-max))))))
+             (lambda (pos)
+               (pi-coding-agent--adjust-pos-after-region-replacements
+                pos replacements)))))))))
 
 (defun pi-coding-agent--display-agent-end ()
   "Finalize agent turn: normalize whitespace, handle abort, process queue.
@@ -417,6 +616,7 @@ Other slash commands (extensions, skills, prompts) are sent to pi.
 Regular text is displayed locally for responsiveness, then sent.
 Must be called with chat buffer current.
 Status transitions are handled by pi events (agent_start, agent_end)."
+  (pi-coding-agent--invalidate-history-loads)
   (cond
    ;; Built-in slash commands: dispatch locally
    ((pi-coding-agent--dispatch-builtin-command text))
@@ -478,6 +678,22 @@ Shows success or final failure with raw error."
    (concat "\n" (propertize (format "[Error: %s]" (or error-msg "unknown"))
                             'face 'pi-coding-agent-error-notice)
            "\n")))
+
+(defun pi-coding-agent--display-startup-error (error-msg &optional stderr)
+  "Display a pi startup ERROR-MSG and optional STDERR."
+  (pi-coding-agent--append-to-chat
+   (concat "\n"
+           (propertize "✗ pi failed to start"
+                       'face 'pi-coding-agent-error-notice)
+           "\n\n"
+           (or error-msg "unknown error")
+           (when stderr
+             (concat "\n\n"
+                     (propertize "stderr:" 'face 'pi-coding-agent-retry-notice)
+                     "\n```text\n"
+                     stderr
+                     (unless (string-suffix-p "\n" stderr) "\n")
+                     "```\n")))))
 
 (defun pi-coding-agent--display-extension-error (event)
   "Display extension error from extension_error EVENT."
@@ -575,16 +791,36 @@ Shows success or final failure with raw error."
     (setq pi-coding-agent--working-message msg)
     (force-mode-line-update t)))
 
+(defconst pi-coding-agent--extension-ui-fire-and-forget-methods
+  '("notify" "setStatus" "setWidget" "setTitle" "set_editor_text"
+    "setWorkingMessage")
+  "Extension UI methods that do not expect RPC responses.")
+
+(defun pi-coding-agent--extension-ui-response-required-p (method)
+  "Return non-nil when unsupported extension UI METHOD may expect a response."
+  (not (member method pi-coding-agent--extension-ui-fire-and-forget-methods)))
+
+(defun pi-coding-agent--extension-ui-warn-unsupported-once (method)
+  "Warn at most once per pi session for unsupported extension UI METHOD."
+  (when (pi-coding-agent--record-unsupported-extension-ui-warning method)
+    (message "Pi: extension UI method `%s' not supported in Emacs" method)))
+
 (defun pi-coding-agent--extension-ui-unsupported (event proc)
-  "Handle unsupported method from EVENT by warning and sending cancelled via PROC.
+  "Handle unsupported method from EVENT, using PROC to cancel when needed.
+Warn at most once per method in a pi session.
+Dialog-like methods receive a cancelled response so extensions do not hang;
+fire-and-forget methods are only warned because they do not expect responses.
 See URL `https://github.com/dnouri/pi-coding-agent/issues/176'."
-  (message "Pi: extension UI method `%s' not supported in Emacs"
-           (plist-get event :method))
-  (when proc
-    (pi-coding-agent--send-extension-ui-response
-     proc (list :type "extension_ui_response"
-                :id (plist-get event :id)
-                :cancelled t))))
+  (let ((method (plist-get event :method))
+        (id (plist-get event :id)))
+    (pi-coding-agent--extension-ui-warn-unsupported-once method)
+    (when (and proc
+               id
+               (pi-coding-agent--extension-ui-response-required-p method))
+      (pi-coding-agent--send-extension-ui-response
+       proc (list :type "extension_ui_response"
+                  :id id
+                  :cancelled t)))))
 
 (defun pi-coding-agent--handle-extension-ui-request (event)
   "Handle extension_ui_request EVENT from pi.
@@ -675,6 +911,16 @@ which asks upfront before any buffers are touched."
         (with-current-buffer chat-buf
           (pi-coding-agent--handle-display-event event))))))
 
+(defun pi-coding-agent--display-custom-message (content)
+  "Display visible custom CONTENT in the current chat buffer."
+  (when (and (stringp content)
+             (not (string-empty-p content)))
+    (let ((start (point-max)))
+      (pi-coding-agent--append-to-chat (concat "\n" content "\n"))
+      (pi-coding-agent--decorate-tables-in-region start (point-max)))
+    ;; Reset so next assistant message shows its header
+    (setq pi-coding-agent--assistant-header-shown nil)))
+
 (defun pi-coding-agent--handle-display-event (event)
   "Handle EVENT for display purposes.
 Updates buffer-local state and renders display updates."
@@ -710,16 +956,9 @@ Updates buffer-local state and renders display updates."
               ;; Reset so next assistant message shows its header
               (setq pi-coding-agent--assistant-header-shown nil))))
          ("custom"
-          ;; Custom message from extension (e.g., /pisay)
-          ;; Display content directly if display flag is set
           (when (plist-get message :display)
-            (let ((content (plist-get message :content)))
-              (when (and content (stringp content) (> (length content) 0))
-                (let ((start (point-max)))
-                  (pi-coding-agent--append-to-chat (concat "\n" content "\n"))
-                  (pi-coding-agent--decorate-tables-in-region start (point-max)))
-                ;; Reset so next assistant message shows its header
-                (setq pi-coding-agent--assistant-header-shown nil)))))
+            (pi-coding-agent--display-custom-message
+             (plist-get message :content))))
          (_
           ;; Assistant message - show header if needed, reset markers
           (unless pi-coding-agent--assistant-header-shown
@@ -748,10 +987,13 @@ Updates buffer-local state and renders display updates."
           (pi-coding-agent--display-thinking-end (plist-get msg-event :content)))
          ((or "toolcall_start" "toolcall_delta" "toolcall_end")
           ;; Preview reconciliation follows the authoritative assistant
-          ;; message content, not a singleton streaming-tool state machine.
+          ;; message content.  The current contentIndex decides which
+          ;; generic tool header is still streaming or complete.
           (pi-coding-agent--set-activity-phase "running")
           (pi-coding-agent--reconcile-toolcall-previews
-           (plist-get event :message)))
+           (plist-get event :message)
+           event-type
+           (plist-get msg-event :contentIndex)))
          ("error"
           ;; Error during streaming (e.g., API error)
           (pi-coding-agent--display-error (plist-get msg-event :reason))))))
@@ -825,6 +1067,8 @@ Updates buffer-local state and renders display updates."
        ;; Process followup queue after successful compaction
        (pi-coding-agent--process-followup-queue)))
     ("agent_end"
+     (pi-coding-agent--set-canonical-messages
+      (plist-get pi-coding-agent--state :messages))
      (pi-coding-agent--display-agent-end)
      (pi-coding-agent--update-hot-tail-boundary)
      (pi-coding-agent--cool-completed-tool-blocks-outside-hot-tail))
@@ -926,7 +1170,8 @@ are left alone."
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-tool-block t)
   (remove-overlays (point-min) (point-max) 'pi-coding-agent-diff-overlay t)
   (setq pi-coding-agent--pending-tool-overlay nil
-        pi-coding-agent--tool-block-order-counter 0)
+        pi-coding-agent--tool-block-order-counter 0
+        pi-coding-agent--thinking-block-order-counter 0)
   (when pi-coding-agent--tool-args-cache
     (clrhash pi-coding-agent--tool-args-cache))
   (when pi-coding-agent--live-tool-blocks
@@ -1083,15 +1328,17 @@ needed for compatibility, the current non-keyed pending block."
     (pi-coding-agent--tool-block-refresh-overlay block))
   block)
 
-(defun pi-coding-agent--tool-block-create (tool-name args &optional tool-call-id order)
+(defun pi-coding-agent--tool-block-create
+    (tool-name args &optional tool-call-id order preview-state)
   "Insert a live tool block for TOOL-NAME with ARGS and return it.
 When TOOL-CALL-ID is non-nil, register the block in the keyed live
-registry.  ORDER records the intended block ordering metadata."
+registry.  ORDER records the intended block ordering metadata.
+When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
   (let* ((block-order (pi-coding-agent--reserve-tool-block-order order))
          (next-block (and order
                           (pi-coding-agent--tool-block-next-after-order
                            block-order)))
-         (header-display (pi-coding-agent--tool-header tool-name args))
+         (header-display (pi-coding-agent--tool-header tool-name args preview-state))
          (path (pi-coding-agent--tool-path args))
          (block nil)
          (inhibit-read-only t))
@@ -1207,13 +1454,16 @@ can safely skip this region."
               'font-lock-face 'pi-coding-agent-tool-output
               'pi-coding-agent-no-fontify t))
 
-(defun pi-coding-agent--tool-header (tool-name args)
+(defun pi-coding-agent--tool-header (tool-name args &optional preview-state)
   "Return propertized header for tool TOOL-NAME with ARGS.
 The tool name prefix uses `pi-coding-agent-tool-name' face and
 the arguments use `pi-coding-agent-tool-command' face.
 Built-in tools show specialized formats (e.g., \"$ cmd\" for bash).
 Generic tools show JSON args: compact when the full header fits
 within `fill-column', pretty-printed otherwise.
+When PREVIEW-STATE is `streaming', generic tools show only their
+name and do not parse or pretty-print ARGS.  Built-in tools ignore
+PREVIEW-STATE and keep their compact streaming headers.
 Uses `font-lock-face' to survive tree-sitter refontification."
   (let ((path (pi-coding-agent--tool-path args)))
     (pcase tool-name
@@ -1225,37 +1475,44 @@ Uses `font-lock-face' to survive tree-sitter refontification."
        (concat (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)
                (propertize (concat " " (or path "...")) 'font-lock-face 'pi-coding-agent-tool-command)))
       (_
-       (let* ((name (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name))
-              (json-pretty (pi-coding-agent--pretty-print-json args))
-              (json-compact (when json-pretty
-                              (mapconcat #'string-trim
-                                         (split-string json-pretty "\n") " ")))
-              (json (cond
-                     ((null json-pretty) nil)
-                     ((<= (+ (length tool-name) 1 (length json-compact))
-                          fill-column)
-                      json-compact)
-                     (t json-pretty))))
-         (if json
-             (concat name (propertize (concat " " json) 'font-lock-face 'pi-coding-agent-tool-command))
-           name))))))
+       (let ((name (propertize tool-name 'font-lock-face 'pi-coding-agent-tool-name)))
+         (if (eq preview-state 'streaming)
+             name
+           (let* ((json-pretty (pi-coding-agent--pretty-print-json args))
+                  (json-compact (when json-pretty
+                                  (mapconcat #'string-trim
+                                             (split-string json-pretty "\n") " ")))
+                  (json (cond
+                         ((null json-pretty) nil)
+                         ((<= (+ (length tool-name) 1 (length json-compact))
+                              fill-column)
+                          json-compact)
+                         (t json-pretty))))
+             (if json
+                 (concat name (propertize (concat " " json) 'font-lock-face 'pi-coding-agent-tool-command))
+               name))))))))
 
-(defun pi-coding-agent--display-tool-start (tool-name args &optional tool-call-id order)
+(defun pi-coding-agent--display-tool-start
+    (tool-name args &optional tool-call-id order preview-state)
   "Insert a tool header for TOOL-NAME with ARGS and return its live block.
 When TOOL-CALL-ID is non-nil, register the block in the keyed live
-registry.  ORDER records ordering metadata for future reconciliation."
-  (pi-coding-agent--tool-block-create tool-name args tool-call-id order))
+registry.  ORDER records ordering metadata for future reconciliation.
+When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
+  (pi-coding-agent--tool-block-create
+   tool-name args tool-call-id order preview-state))
 
-(defun pi-coding-agent--display-tool-update-header (tool-name args &optional block)
+(defun pi-coding-agent--display-tool-update-header
+    (tool-name args &optional block preview-state)
   "Update BLOCK's header for TOOL-NAME with ARGS.
 When BLOCK is nil, fall back to the current compatibility tool block.
 Replaces the header text when it has changed (e.g., when authoritative
-args arrive at tool_execution_start after streaming placeholder)."
+args arrive at tool_execution_start after streaming placeholder).
+When PREVIEW-STATE is `streaming', generic tool headers omit ARGS."
   (when-let* ((block (or block (pi-coding-agent--current-tool-block)))
               (ov (pi-coding-agent--tool-block-overlay block))
               (ov-start (overlay-start ov))
               (header-end (pi-coding-agent--tool-block-header-end block)))
-    (let ((new-header (pi-coding-agent--tool-header tool-name args))
+    (let ((new-header (pi-coding-agent--tool-header tool-name args preview-state))
           (header-limit (1- (marker-position header-end))))
       (when (<= ov-start header-limit)
         (let ((old-header (buffer-substring-no-properties ov-start header-limit)))
@@ -1287,18 +1544,28 @@ Each element is a plist `(:content-index N :tool-call TOOL-CALL)'."
                   tool-calls)))))
     (nreverse tool-calls)))
 
-(defun pi-coding-agent--reconcile-toolcall-preview-block (content-index tool-call)
-  "Create or update the preview block for TOOL-CALL at CONTENT-INDEX."
+(defun pi-coding-agent--reconcile-toolcall-preview-block
+    (content-index tool-call &optional event-type event-content-index)
+  "Create or update the preview block for TOOL-CALL at CONTENT-INDEX.
+EVENT-TYPE and EVENT-CONTENT-INDEX identify the content block whose
+streaming state changed."
   (let* ((tool-call-id (plist-get tool-call :id))
          (tool-name (plist-get tool-call :name))
          (args (plist-get tool-call :arguments))
-         (block (or (pi-coding-agent--tool-block-get tool-call-id)
+         (event-entry-p (or (null event-content-index)
+                            (equal event-content-index content-index)))
+         (streaming-p (member event-type '("toolcall_start" "toolcall_delta")))
+         (preview-state (and streaming-p 'streaming))
+         (existing-block (pi-coding-agent--tool-block-get tool-call-id))
+         (block (or existing-block
                     (pi-coding-agent--display-tool-start
-                     tool-name args tool-call-id content-index))))
+                     tool-name args tool-call-id content-index preview-state))))
     (setq pi-coding-agent--pending-tool-overlay
           (pi-coding-agent--tool-block-overlay block))
-    (pi-coding-agent--display-tool-update-header tool-name args block)
-    (when (equal tool-name "write")
+    (when (and existing-block event-entry-p)
+      (pi-coding-agent--display-tool-update-header
+       tool-name args block preview-state))
+    (when (and event-entry-p (equal tool-name "write"))
       (let ((content-entry (and args (plist-member args :content))))
         (when content-entry
           (pi-coding-agent--display-tool-streaming-text
@@ -1316,8 +1583,11 @@ Each element is a plist `(:content-index N :tool-call TOOL-CALL)'."
       (unless (member tool-call-id tool-call-ids)
         (pi-coding-agent--tool-block-delete block)))))
 
-(defun pi-coding-agent--reconcile-toolcall-previews (message)
-  "Reconcile live preview blocks from assistant MESSAGE content."
+(defun pi-coding-agent--reconcile-toolcall-previews
+    (message &optional event-type event-content-index)
+  "Reconcile live preview blocks from assistant MESSAGE content.
+EVENT-TYPE and EVENT-CONTENT-INDEX identify the toolcall block whose
+streaming state changed."
   (let* ((entries (pi-coding-agent--message-tool-calls message))
          (tool-call-ids (delq nil (mapcar (lambda (entry)
                                             (plist-get (plist-get entry :tool-call) :id))
@@ -1326,7 +1596,9 @@ Each element is a plist `(:content-index N :tool-call TOOL-CALL)'."
     (dolist (entry entries)
       (pi-coding-agent--reconcile-toolcall-preview-block
        (plist-get entry :content-index)
-       (plist-get entry :tool-call)))))
+       (plist-get entry :tool-call)
+       event-type
+       event-content-index))))
 
 (defun pi-coding-agent--extract-text-from-content (content-blocks)
   "Extract text from CONTENT-BLOCKS vector efficiently.
@@ -1662,6 +1934,98 @@ Preserves window scroll position during the toggle."
                   (set-window-start win block-start t)
                   (set-window-point win block-start))))))))))
 
+(defun pi-coding-agent--replace-thinking-block-region (start end rendered)
+  "Replace completed-thinking text in START..END with RENDERED.
+Returns the new bounds as (START . NEW-END)."
+  (let ((inhibit-read-only t)
+        new-end)
+    (save-excursion
+      (goto-char start)
+      (delete-region start end)
+      (insert rendered)
+      (setq new-end (point))
+      (condition-case-unless-debug nil
+          (font-lock-ensure start new-end)
+        (error nil)))
+    (cons start new-end)))
+
+(defun pi-coding-agent--replace-thinking-block (block rendered)
+  "Replace completed thinking BLOCK with RENDERED text.
+Returns the new block bounds as (START . END) and preserves useful window
+context after the rewrite."
+  (let* ((start (plist-get block :start))
+         (end (plist-get block :end))
+         (buffer (current-buffer))
+         (saved-windows (pi-coding-agent--capture-window-rewrite-states))
+         (new-bounds (pi-coding-agent--replace-thinking-block-region
+                      start end rendered))
+         (delta (- (cdr new-bounds) end)))
+    (pi-coding-agent--restore-window-rewrite-states
+     buffer
+     saved-windows
+     (let ((replacements (list (list start end delta))))
+       (lambda (pos)
+         (pi-coding-agent--adjust-pos-after-region-replacements
+          pos replacements))))
+    new-bounds))
+
+(defun pi-coding-agent--completed-thinking-blocks ()
+  "Return completed thinking blocks in the current buffer in source order."
+  (let ((pos (point-min))
+        blocks)
+    (while (< pos (point-max))
+      (if (get-text-property pos 'pi-coding-agent-thinking-block)
+          (when-let* ((block (pi-coding-agent--thinking-block-metadata-at-pos pos)))
+            (push block blocks)
+            (setq pos (plist-get block :end)))
+        (setq pos (or (next-single-property-change
+                       pos 'pi-coding-agent-thinking-block nil (point-max))
+                      (point-max)))))
+    (nreverse blocks)))
+
+(defun pi-coding-agent--apply-thinking-display-to-completed-blocks (display)
+  "Rewrite every completed thinking block in the current buffer for DISPLAY.
+DISPLAY is either `visible' or `hidden'.  Returns replacement records when at
+least one completed thinking block changed, otherwise nil.  Unrelated buffer
+content is left alone.  Each replacement record is (START END DELTA), using
+coordinates from before the rewrites."
+  (let (replacements)
+    (save-excursion
+      (dolist (block (nreverse (pi-coding-agent--completed-thinking-blocks)))
+        (unless (eq (plist-get block :display) display)
+          (when-let* ((rendered
+                       (pi-coding-agent--completed-thinking-rendered-from-normalized
+                        (plist-get block :normalized)
+                        (plist-get block :order)
+                        display)))
+            (let* ((start (plist-get block :start))
+                   (end (plist-get block :end))
+                   (new-bounds (pi-coding-agent--replace-thinking-block-region
+                                start end rendered)))
+              (push (list start end (- (cdr new-bounds) end))
+                    replacements))))))
+    replacements))
+
+(defun pi-coding-agent--toggle-thinking-block-at-point ()
+  "Toggle the completed-thinking block at point.
+Returns non-nil when point was inside a completed thinking block and the block
+was toggled successfully."
+  (when-let* ((block (pi-coding-agent--thinking-block-metadata-at-pos (point)))
+              (normalized (plist-get block :normalized))
+              (order (plist-get block :order))
+              (display (plist-get block :display))
+              (rendered (pi-coding-agent--completed-thinking-rendered-from-normalized
+                         normalized
+                         order
+                         (if (eq display 'hidden) 'visible 'hidden))))
+    (let* ((original-pos (point))
+           (new-bounds (pi-coding-agent--replace-thinking-block block rendered))
+           (new-start (car new-bounds))
+           (new-end (cdr new-bounds)))
+      (goto-char (max new-start
+                      (min original-pos (max new-start (1- new-end))))))
+    t))
+
 (defun pi-coding-agent--insert-rendered-tool-content (content lang is-edit-diff)
   "Insert CONTENT rendered for LANG with a trailing newline.
 When IS-EDIT-DIFF is non-nil, apply diff overlays to the inserted block."
@@ -1723,24 +2087,27 @@ Returns (START . END) if inside a tool block, nil otherwise."
       found)))
 
 (defun pi-coding-agent-toggle-tool-section ()
-  "Toggle the tool output section at point.
-Works anywhere inside a tool block overlay."
+  "Toggle the section at point.
+Completed thinking blocks toggle first, then tool output blocks, then the
+command falls back to `outline-cycle' for turn folding."
   (interactive)
-  (let ((original-pos (point)))
-    (if-let* ((bounds (pi-coding-agent--find-tool-block-bounds)))
-        (if-let* ((btn (pi-coding-agent--find-toggle-button-in-region (car bounds) (cdr bounds))))
-            (progn
-              (pi-coding-agent--toggle-tool-output btn)
-              ;; Try to restore position, clamped to new block bounds.
-              ;; Use (1- end) because overlays-at uses half-open [start, end),
-              ;; so clamping to exactly end would place cursor outside the
-              ;; overlay, breaking the next toggle.
-              (when-let* ((new-bounds (pi-coding-agent--find-tool-block-bounds)))
-                (goto-char (min original-pos (1- (cdr new-bounds))))))
-          ;; No button found - short output, use outline-cycle
-          (outline-cycle))
-      ;; Not in a tool block
-      (outline-cycle))))
+  (unless (pi-coding-agent--toggle-thinking-block-at-point)
+    (let ((original-pos (point)))
+      (if-let* ((bounds (pi-coding-agent--find-tool-block-bounds)))
+          (if-let* ((btn (pi-coding-agent--find-toggle-button-in-region
+                          (car bounds) (cdr bounds))))
+              (progn
+                (pi-coding-agent--toggle-tool-output btn)
+                ;; Try to restore position, clamped to new block bounds.
+                ;; Use (1- end) because overlays-at uses half-open [start, end),
+                ;; so clamping to exactly end would place cursor outside the
+                ;; overlay, breaking the next toggle.
+                (when-let* ((new-bounds (pi-coding-agent--find-tool-block-bounds)))
+                  (goto-char (min original-pos (1- (cdr new-bounds))))))
+            ;; No button found - short output, use outline-cycle
+            (outline-cycle))
+        ;; Not in a tool block
+        (outline-cycle)))))
 
 ;;;; Tool Block Cooling
 ;;
@@ -2040,8 +2407,11 @@ For example: '+ 7     code' or '-12     code'"
                                     'diff-indicator-removed))
         (overlay-put ind-ov 'priority pi-coding-agent--diff-indicator-priority)
         (overlay-put ind-ov 'pi-coding-agent-diff-overlay t)
-        ;; Line background face - higher than tool-block but lower than indicator
-        (overlay-put line-ov 'face (if is-added 'diff-added 'diff-removed))
+        ;; Line background face - higher than tool-block but lower than indicator.
+        ;; Use theme-derived background-only faces so syntax foregrounds stay visible.
+        (overlay-put line-ov 'face (if is-added
+                                      'pi-coding-agent-diff-line-added
+                                    'pi-coding-agent-diff-line-removed))
         (overlay-put line-ov 'priority pi-coding-agent--diff-line-priority)
         (overlay-put line-ov 'pi-coding-agent-diff-overlay t)))))
 
@@ -2129,19 +2499,48 @@ all overlapping tool headers, live or finalized."
 
 ;;;; History Display
 
-(defun pi-coding-agent--extract-message-text (message)
-  "Extract plain text content from MESSAGE.
-MESSAGE is a plist with :role and :content.
-Returns concatenated text from all text blocks."
-  (let* ((content (plist-get message :content))
-         (texts '()))
-    (when (vectorp content)
-      (dotimes (i (length content))
-        (let* ((block (aref content i))
-               (block-type (plist-get block :type)))
-          (when (equal block-type "text")
-            (push (plist-get block :text) texts)))))
-    (string-join (nreverse texts) "")))
+(defun pi-coding-agent--extract-history-user-message-text (message)
+  "Extract visible user text from history MESSAGE.
+Supports both string content and text-block vectors.  Returns nil when
+MESSAGE has no visible text content."
+  (let ((content (plist-get message :content)))
+    (cond
+     ((stringp content)
+      (unless (string-empty-p content) content))
+     ((vectorp content)
+      (pi-coding-agent--extract-user-message-text content))
+     (t nil))))
+
+(defun pi-coding-agent--completed-thinking-rendered-from-normalized
+    (normalized &optional block-order display)
+  "Return completed thinking NORMALIZED text rendered for DISPLAY.
+BLOCK-ORDER identifies the logical completed-thinking block across rerenders.
+Returns nil when NORMALIZED has no visible completed-thinking content."
+  (unless (string-empty-p normalized)
+    (let ((display (or display (pi-coding-agent--thinking-display-mode))))
+      (pi-coding-agent--propertize-completed-thinking
+       (pcase display
+         ('hidden (pi-coding-agent--thinking-hidden-stub normalized))
+         (_ (pi-coding-agent--thinking-blockquote-text normalized)))
+       (or block-order (pi-coding-agent--next-thinking-block-order))
+       normalized
+       display))))
+
+(defun pi-coding-agent--completed-thinking-rendered-text
+    (text &optional block-order display)
+  "Return completed thinking TEXT rendered for DISPLAY.
+BLOCK-ORDER identifies the logical completed-thinking block across rerenders.
+Returns nil when TEXT normalizes to no visible thinking content."
+  (pi-coding-agent--completed-thinking-rendered-from-normalized
+   (pi-coding-agent--thinking-normalize-text text)
+   block-order
+   display))
+
+(defun pi-coding-agent--render-history-thinking (text)
+  "Render completed thinking TEXT during session history replay.
+Uses the current buffer's completed-thinking display mode."
+  (when-let* ((rendered (pi-coding-agent--completed-thinking-rendered-text text)))
+    (pi-coding-agent--render-history-text rendered)))
 
 (defun pi-coding-agent--build-tool-result-index (messages)
   "Build hash-table mapping toolCallId to toolResult message from MESSAGES."
@@ -2188,6 +2587,237 @@ and :arguments.  RESULT is the matching toolResult message, or nil."
       (let ((inhibit-read-only t))
         (save-excursion (goto-char (point-max)) (insert "\n"))))))
 
+(defun pi-coding-agent--render-history-assistant-content (message results)
+  "Render assistant MESSAGE content blocks in source order.
+RESULTS maps toolCallId strings to matching toolResult messages."
+  (let ((content (plist-get message :content))
+        (pending-text nil))
+    (cl-labels ((flush-text ()
+                  (when pending-text
+                    (pi-coding-agent--render-history-text
+                     (string-join (nreverse pending-text) ""))
+                    (setq pending-text nil))))
+      (cond
+       ((stringp content)
+        (unless (string-empty-p content)
+          (pi-coding-agent--render-history-text content)))
+       ((vectorp content)
+        (dotimes (i (length content))
+          (let* ((block (aref content i))
+                 (block-type (plist-get block :type)))
+            (pcase block-type
+              ("text"
+               (push (or (plist-get block :text) "") pending-text))
+              ("thinking"
+               (flush-text)
+               (pi-coding-agent--render-history-thinking
+                (plist-get block :thinking)))
+              ("toolCall"
+               (flush-text)
+               (pi-coding-agent--render-history-tool
+                block (gethash (plist-get block :id) results))))))
+        (flush-text))))))
+
+(defun pi-coding-agent--rewrite-tail-window-p
+    (window-point window-end point-max point-row body-height)
+  "Return non-nil when WINDOW-POINT or WINDOW-END should follow a rewritten tail.
+A WINDOW-POINT at or just before POINT-MAX is tail-following.  A WINDOW-END that
+merely reaches POINT-MAX counts only when POINT-ROW already sits in the lower
+half of BODY-HEIGHT, so tall windows inspecting mid-buffer context do not get
+misclassified as tail-following just because they can also see the tail."
+  (or (>= window-point (1- point-max))
+      (and (>= window-end (1- point-max))
+           (< point-row (max 1 body-height))
+           (>= point-row (/ (max 1 body-height) 2)))))
+
+(defun pi-coding-agent--clamp-rewrite-point-row (saved-row above-lines tail-lines body-height)
+  "Clamp SAVED-ROW after a buffer rewrite.
+ABOVE-LINES counts screen lines before point, TAIL-LINES counts screen lines
+from point through the tail, and BODY-HEIGHT is the window body height in
+screen lines.
+
+When the whole buffer is shorter than the window, preserving a full window is
+impossible, so the row falls back to the highest still-visible row.  Otherwise,
+clamp the row so the tail still fills the window after the rewrite."
+  (let* ((max-row (min (max 0 (1- body-height)) above-lines))
+         (total-lines (+ above-lines tail-lines)))
+    (if (< total-lines body-height)
+        (min saved-row max-row)
+      (let ((min-row (max 0 (- body-height tail-lines))))
+        (max min-row (min saved-row max-row))))))
+
+(defun pi-coding-agent--live-thinking-start-at-pos (pos)
+  "Return active thinking block start when POS is inside live thinking."
+  (when (and (markerp pi-coding-agent--thinking-start-marker)
+             (markerp pi-coding-agent--thinking-marker)
+             (marker-position pi-coding-agent--thinking-start-marker)
+             (marker-position pi-coding-agent--thinking-marker))
+    (let ((start (marker-position pi-coding-agent--thinking-start-marker))
+          (end (marker-position pi-coding-agent--thinking-marker)))
+      (when (and (<= start pos) (< pos end))
+        start))))
+
+(defun pi-coding-agent--capture-window-rewrite-state (window point-max)
+  "Return saved WINDOW state before a buffer rewrite.
+POINT-MAX is the old buffer end before the rewrite begins."
+  (let* ((point (window-point window))
+         (body-height (max 1 (window-body-height window)))
+         (row (count-screen-lines (window-start window)
+                                  point
+                                  nil
+                                  window)))
+    (list :window window
+          :tail-p (pi-coding-agent--rewrite-tail-window-p
+                   point
+                   (window-end window t)
+                   point-max
+                   row
+                   body-height)
+          :start (window-start window)
+          :point point
+          :thinking-block (pi-coding-agent--thinking-block-at-pos point)
+          :live-thinking-start (pi-coding-agent--live-thinking-start-at-pos point)
+          :row row)))
+
+(defun pi-coding-agent--capture-window-rewrite-states ()
+  "Return saved rewrite states for visible windows showing the current buffer."
+  (let ((old-point-max (point-max))
+        (buffer (current-buffer)))
+    (mapcar (lambda (win)
+              (pi-coding-agent--capture-window-rewrite-state win old-point-max))
+            (get-buffer-window-list buffer nil t))))
+
+(defun pi-coding-agent--adjust-pos-after-region-replacements
+    (pos replacements)
+  "Return POS adjusted after REPLACEMENTS, or nil when POS was deleted.
+Each entry in REPLACEMENTS is (START END DELTA), using coordinates from before
+any replacement was applied."
+  (let ((total-delta 0))
+    (catch 'deleted
+      (dolist (replacement replacements (+ pos total-delta))
+        (pcase-let ((`(,start ,end ,delta) replacement))
+          (cond
+           ((and (<= start pos) (< pos end))
+            (throw 'deleted nil))
+           ((>= pos end)
+            (setq total-delta (+ total-delta delta)))))))))
+
+(defun pi-coding-agent--map-window-rewrite-pos (pos map-position fallback)
+  "Map old POS through MAP-POSITION, or return FALLBACK when POS was deleted."
+  (if map-position
+      (or (funcall map-position pos) fallback)
+    (min pos (point-max))))
+
+(defun pi-coding-agent--resolve-window-rewrite-point
+    (window-state &optional map-position)
+  "Return the best restored point for WINDOW-STATE after a buffer rewrite.
+When point was inside a completed or live thinking block, prefer the rewritten
+block start.  Otherwise map the saved numeric point through MAP-POSITION when
+provided, or clamp it into the rewritten buffer."
+  (or (pi-coding-agent--thinking-block-start
+       (plist-get window-state :thinking-block))
+      (plist-get window-state :live-thinking-start)
+      (pi-coding-agent--map-window-rewrite-pos
+       (plist-get window-state :point)
+       map-position
+       (min (plist-get window-state :point) (point-max)))))
+
+(defun pi-coding-agent--window-start-fills-window-p
+    (start point-max body-height window)
+  "Return non-nil when START still fills WINDOW after a rewrite.
+A filled view leaves at most one blank row in BODY-HEIGHT after POINT-MAX.
+Preserving the user's viewport is better than scrolling to command point when
+the old start remains useful."
+  (>= (count-screen-lines start point-max nil window)
+      (1- body-height)))
+
+(defun pi-coding-agent--restore-window-rewrite-state
+    (window-state &optional map-position)
+  "Restore WINDOW-STATE after a large buffer rewrite.
+Tail-following windows stay pinned to the rewritten tail.  Other windows
+restore point, then recenter to a clamped screen-line row so the window stays
+filled when possible instead of showing a mostly blank tail view.
+MAP-POSITION, when non-nil, maps old buffer positions to new ones and returns
+nil for positions deleted by the rewrite."
+  (let ((win (plist-get window-state :window)))
+    (when (and (window-live-p win)
+               (eq (window-buffer win) (current-buffer)))
+      (with-selected-window win
+        (let* ((point-max (point-max))
+               (point (pi-coding-agent--resolve-window-rewrite-point
+                       window-state map-position)))
+          (if (plist-get window-state :tail-p)
+              (progn
+                (goto-char point-max)
+                (recenter -1))
+            (goto-char point)
+            (let* ((body-height (max 1 (window-body-height win)))
+                   (saved-start
+                    (pi-coding-agent--map-window-rewrite-pos
+                     (plist-get window-state :start)
+                     map-position
+                     point)))
+              (if (pi-coding-agent--window-start-fills-window-p
+                   saved-start point-max body-height win)
+                  (progn
+                    (set-window-start win saved-start t)
+                    (set-window-point win (max point saved-start)))
+                (let* ((above-lines (count-screen-lines (point-min) point nil win))
+                       (tail-lines (max 1 (count-screen-lines point point-max nil win)))
+                       (row (pi-coding-agent--clamp-rewrite-point-row
+                             (plist-get window-state :row)
+                             above-lines
+                             tail-lines
+                             body-height)))
+                  (recenter row))))))))))
+
+(defun pi-coding-agent--restore-window-rewrite-states
+    (buffer window-states &optional map-position)
+  "Restore WINDOW-STATES for BUFFER after a large rewrite.
+MAP-POSITION is passed to `pi-coding-agent--restore-window-rewrite-state'."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (save-selected-window
+        (dolist (window-state window-states)
+          (pi-coding-agent--restore-window-rewrite-state
+           window-state map-position))))))
+
+(defun pi-coding-agent--rerender-canonical-history ()
+  "Rebuild the current chat buffer from cached canonical messages.
+Visible chat windows keep useful context after the rewrite: windows already at
+or showing the tail stay at the rebuilt tail, while other windows restore point
+and approximately the same screen-line row, clamped so the window stays filled
+when possible."
+  (let ((messages pi-coding-agent--canonical-messages))
+    (when (vectorp messages)
+      (pi-coding-agent--with-window-rewrite-preservation
+        (pi-coding-agent--display-session-history messages (current-buffer))))))
+
+(defun pi-coding-agent--set-chat-thinking-display (mode)
+  "Set completed-thinking display MODE for the current chat buffer.
+Completed thinking already shown in the buffer is rewritten in place so the
+whole-buffer toggle applies one mode to every finished thinking block without
+rebuilding unrelated chat content. Live thinking stays visible while the
+assistant is still working, and MODE is used when that block completes."
+  (let ((chat-buf (pi-coding-agent--get-chat-buffer)))
+    (unless chat-buf
+      (user-error "No pi session buffer"))
+    (with-current-buffer chat-buf
+      (pi-coding-agent--set-thinking-display mode)
+      (let ((buffer (current-buffer))
+            (saved-windows (pi-coding-agent--capture-window-rewrite-states)))
+        (when-let* ((replacements
+                     (pi-coding-agent--apply-thinking-display-to-completed-blocks
+                      mode)))
+          (pi-coding-agent--restore-window-rewrite-states
+           buffer
+           saved-windows
+           (lambda (pos)
+             (pi-coding-agent--adjust-pos-after-region-replacements
+              pos replacements))))))
+    (message "Pi: This chat now %s completed thinking"
+             (if (eq mode 'hidden) "hides" "shows"))))
+
 (defun pi-coding-agent--display-history-messages (messages)
   "Display MESSAGES from session history with full tool rendering.
 Consecutive assistant messages are grouped under one header.
@@ -2199,27 +2829,22 @@ Tool calls are rendered with headers, output, overlays, and toggles."
              (role (plist-get message :role)))
         (pcase role
           ("user"
-           (let* ((text (pi-coding-agent--extract-message-text message))
+           (let* ((text (pi-coding-agent--extract-history-user-message-text message))
                   (timestamp (pi-coding-agent--ms-to-time (plist-get message :timestamp))))
-             (when (and text (not (string-empty-p text)))
+             (when text
                (pi-coding-agent--display-user-message text timestamp)))
            (setq prev-role "user"))
           ("assistant"
            (when (not (equal prev-role "assistant"))
              (pi-coding-agent--append-to-chat
               (concat "\n" (pi-coding-agent--make-separator "Assistant") "\n")))
-           (let* ((content (plist-get message :content))
-                  (text (pi-coding-agent--extract-message-text message)))
-             (when (and text (not (string-empty-p text)))
-               (pi-coding-agent--render-history-text text))
-             ;; Render each tool call with its result
-             (when (vectorp content)
-               (dotimes (j (length content))
-                 (let ((block (aref content j)))
-                   (when (equal (plist-get block :type) "toolCall")
-                     (pi-coding-agent--render-history-tool
-                      block (gethash (plist-get block :id) results)))))))
+           (pi-coding-agent--render-history-assistant-content message results)
            (setq prev-role "assistant"))
+          ("custom"
+           (when (plist-get message :display)
+             (pi-coding-agent--display-custom-message
+              (plist-get message :content)))
+           (setq prev-role "custom"))
           ("compactionSummary"
            (let* ((summary (plist-get message :summary))
                   (tokens-before (plist-get message :tokensBefore))
@@ -2237,6 +2862,7 @@ Note: When called from async callbacks, pass CHAT-BUF explicitly."
   (setq chat-buf (or chat-buf (pi-coding-agent--get-chat-buffer)))
   (when (and chat-buf (buffer-live-p chat-buf))
     (with-current-buffer chat-buf
+      (pi-coding-agent--set-canonical-messages messages)
       (let ((inhibit-read-only t))
         (pi-coding-agent--clear-render-artifacts)
         (erase-buffer)

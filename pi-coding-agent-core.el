@@ -197,22 +197,59 @@ Calls only the handler registered for this specific process."
   (when-let* ((handler (process-get proc 'pi-coding-agent-display-handler)))
     (funcall handler event)))
 
+(defconst pi-coding-agent--process-stderr-max-chars 4000
+  "Maximum number of stderr characters to keep in process exit excerpts.")
+
+(defun pi-coding-agent--process-stderr-excerpt (proc)
+  "Return a bounded stderr excerpt for PROC, or nil when stderr is empty."
+  (when-let* ((stderr-buf (process-get proc 'pi-coding-agent-stderr-buf))
+              ((buffer-live-p stderr-buf)))
+    (let ((text (string-trim-right
+                 (with-current-buffer stderr-buf
+                   (buffer-substring-no-properties (point-min) (point-max))))))
+      (unless (string-empty-p text)
+        (if (<= (length text) pi-coding-agent--process-stderr-max-chars)
+            text
+          (let* ((head-chars (/ pi-coding-agent--process-stderr-max-chars 2))
+                 (tail-chars (- pi-coding-agent--process-stderr-max-chars
+                                head-chars)))
+            (concat (substring text 0 head-chars)
+                    "\n… [stderr truncated] …\n"
+                    (substring text (- (length text) tail-chars)))))))))
+
+(defun pi-coding-agent--cleanup-process-stderr-buffer (proc)
+  "Kill PROC's stderr buffer, if any, and clear its process property."
+  (when-let* ((stderr-buf (process-get proc 'pi-coding-agent-stderr-buf)))
+    (process-put proc 'pi-coding-agent-stderr-buf nil)
+    (when (buffer-live-p stderr-buf)
+      (when-let* ((stderr-proc (get-buffer-process stderr-buf)))
+        (set-process-query-on-exit-flag stderr-proc nil)
+        (delete-process stderr-proc))
+      (kill-buffer stderr-buf))))
+
 (defun pi-coding-agent--handle-process-exit (proc event)
   "Clean up when pi process PROC exits with EVENT.
 Calls pending request callbacks for this process with an error response
 containing EVENT, then clears this process's pending request tables."
-  (let ((pending (process-get proc 'pi-coding-agent-pending-requests))
-        (pending-types (process-get proc 'pi-coding-agent-pending-command-types))
-        (error-response (list :type "response"
-                              :success :false
-                              :error (format "Process exited: %s" (string-trim event)))))
-    (when pending
-      (maphash (lambda (_id callback)
-                 (funcall callback error-response))
-               pending)
-      (clrhash pending))
-    (when pending-types
-      (clrhash pending-types))))
+  (let* ((pending (process-get proc 'pi-coding-agent-pending-requests))
+         (pending-types (process-get proc 'pi-coding-agent-pending-command-types))
+         (stderr (pi-coding-agent--process-stderr-excerpt proc))
+         (error-response
+          (append (list :type "response"
+                        :success :false
+                        :error (format "Process exited: %s" (string-trim event)))
+                  (when stderr
+                    (list :stderr stderr)))))
+    (unwind-protect
+        (progn
+          (when pending
+            (maphash (lambda (_id callback)
+                       (funcall callback error-response))
+                     pending)
+            (clrhash pending))
+          (when pending-types
+            (clrhash pending-types)))
+      (pi-coding-agent--cleanup-process-stderr-buffer proc))))
 
 (defvar pi-coding-agent-executable)  ; forward decl — core.el cannot require ui.el
 
@@ -227,13 +264,24 @@ This is useful for testing extensions or passing additional flags.")
 (defun pi-coding-agent--start-process (directory)
   "Start pi RPC process in DIRECTORY.
 Returns the process object."
-  (let ((default-directory directory))
-    (make-process
-     :name "pi"
-     :command `(,@pi-coding-agent-executable "--mode" "rpc" ,@pi-coding-agent-extra-args)
-     :connection-type 'pipe
-     :filter #'pi-coding-agent--process-filter
-     :sentinel #'pi-coding-agent--process-sentinel)))
+  (let ((default-directory directory)
+        (stderr-buf (generate-new-buffer " *pi-coding-agent-stderr*")))
+    (condition-case err
+        (let ((proc (make-process
+                     :name "pi"
+                     :command `(,@pi-coding-agent-executable "--mode" "rpc" ,@pi-coding-agent-extra-args)
+                     :connection-type 'pipe
+                     :stderr stderr-buf
+                     :filter #'pi-coding-agent--process-filter
+                     :sentinel #'pi-coding-agent--process-sentinel)))
+          (process-put proc 'pi-coding-agent-stderr-buf stderr-buf)
+          (when-let* ((stderr-proc (get-buffer-process stderr-buf)))
+            (set-process-query-on-exit-flag stderr-proc nil))
+          proc)
+      (error
+       (when (buffer-live-p stderr-buf)
+         (kill-buffer stderr-buf))
+       (signal (car err) (cdr err))))))
 
 ;;;; State Management
 
@@ -271,8 +319,10 @@ Verification is needed when:
           pi-coding-agent--state-verify-interval)))
 
 (defun pi-coding-agent--json-false-p (value)
-  "Return t if VALUE represents JSON false."
-  (eq value :false))
+  "Return t if VALUE represents JSON false.
+`json-parse-string' yields `:false', while older helpers and tests may still
+use `:json-false'.  Treat both as falsey JSON sentinels."
+  (memq value '(:false :json-false)))
 
 (defun pi-coding-agent--json-null-p (value)
   "Return t if VALUE represents JSON null.
@@ -281,7 +331,7 @@ Verification is needed when:
 
 (defun pi-coding-agent--normalize-boolean (value)
   "Convert JSON boolean VALUE to Elisp boolean.
-JSON true (t) stays t, JSON false (:false) becomes nil."
+JSON true (t) stays t, and either supported false sentinel becomes nil."
   (if (pi-coding-agent--json-false-p value) nil value))
 
 (defun pi-coding-agent--normalize-string-or-null (value)

@@ -6,7 +6,7 @@
 ;; Maintainer: Daniel Nouri <daniel.nouri@gmail.com>
 ;; URL: https://github.com/dnouri/pi-coding-agent
 ;; Keywords: ai llm ai-pair-programming tools
-;; Version: 2.2.1
+;; Version: 2.3.1
 ;; Package-Requires: ((emacs "29.1") (transient "0.9.0") (md-ts-mode "0.3.0") (markdown-table-wrap "0.2.0"))
 
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -61,7 +61,7 @@
 ;;
 ;;   Chat buffer:
 ;;     n / p          Navigate messages
-;;     TAB            Toggle tool output
+;;     TAB            Toggle completed thinking/tool section or fold turn
 ;;     RET            Visit file at point (from tool blocks)
 ;;     C-c C-p        Open menu
 ;;
@@ -73,7 +73,8 @@
 ;;       C-c C-s  queues steering (interrupts after current tool)
 ;;
 ;; Press C-c C-p for the full transient menu with model selection,
-;; thinking level, session management, and custom commands.
+;; thinking level, completed-thinking controls, session management,
+;; and custom commands.
 ;;
 ;; See README.org for more documentation.
 
@@ -110,13 +111,19 @@ Returns the chat buffer."
                 (proc pi-coding-agent--process))  ; Capture for closures
             (pi-coding-agent--rpc-async proc '(:type "get_state")
               (lambda (response)
-                (pi-coding-agent--apply-state-response buf response)
-                ;; Check if no model available and warn user
-                (when (and (plist-get response :success)
-                           (buffer-live-p buf))
-                  (with-current-buffer buf
-                    (unless (plist-get pi-coding-agent--state :model)
-                      (pi-coding-agent--display-no-model-warning))))))
+                (if (eq (plist-get response :success) t)
+                    (progn
+                      (pi-coding-agent--apply-state-response buf response)
+                      ;; Check if no model available and warn user
+                      (when (buffer-live-p buf)
+                        (with-current-buffer buf
+                          (unless (plist-get pi-coding-agent--state :model)
+                            (pi-coding-agent--display-no-model-warning)))))
+                  (when (buffer-live-p buf)
+                    (with-current-buffer buf
+                      (pi-coding-agent--display-startup-error
+                       (plist-get response :error)
+                       (plist-get response :stderr)))))))
             ;; Fetch commands via RPC (independent of get_state)
             (pi-coding-agent--fetch-commands proc
               (lambda (commands)

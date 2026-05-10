@@ -158,26 +158,188 @@ Models may send \\n\\n before thinking content too."
 
 (ert-deftest pi-coding-agent-test-thinking-leading-trailing-newlines-normalized ()
   "Thinking boundaries should not render extra empty blockquote lines."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--display-agent-start)
-    (pi-coding-agent--display-thinking-start)
-    (pi-coding-agent--display-thinking-delta "\n\nSingle thought.\n\n")
-    (pi-coding-agent--display-thinking-end "")
-    (goto-char (point-min))
-    (should (re-search-forward "^> Single thought\\.$" nil t))
-    (goto-char (point-min))
-    (should-not (re-search-forward "^>\\s-*$" nil t))))
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta "\n\nSingle thought.\n\n")
+      (pi-coding-agent--display-thinking-end "")
+      (goto-char (point-min))
+      (should (re-search-forward "^> Single thought\\.$" nil t))
+      (goto-char (point-min))
+      (should-not (re-search-forward "^>\\s-*$" nil t)))))
+
+(ert-deftest pi-coding-agent-test-hidden-thinking-shows-live-then-collapses-to-preview-line ()
+  "Hidden mode still shows live thinking, then collapses it to a summary line."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta
+       "Crafting response style\nCheck examples\nPolish wording")
+      (should (string-match-p "> Crafting response style" (buffer-string)))
+      (pi-coding-agent--display-thinking-end "")
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  "> Thinking: Crafting response style… (2 more lines)")
+                 text))
+        (should-not (string-match-p "> Crafting response style" text))))))
+
+(ert-deftest pi-coding-agent-test-hidden-thinking-falls-back-when-first-line-is-too-long ()
+  "Collapsed thinking falls back to the generic hidden label for long first lines."
+  (let ((pi-coding-agent-thinking-display 'hidden)
+        (long-line (make-string 72 ?x)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta
+       (concat long-line "\nSecond line"))
+      (pi-coding-agent--display-thinking-end "")
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote "> Thinking hidden… (2 lines)")
+                 text))
+        (should-not (string-match-p long-line text))))))
+
+(ert-deftest pi-coding-agent-test-hidden-thinking-falls-back-when-first-line-is-too-short ()
+  "Collapsed thinking falls back when the first line is shorter than 3 chars."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta "ok\nSecond line")
+      (pi-coding-agent--display-thinking-end "")
+      (should (string-match-p
+               (regexp-quote "> Thinking hidden… (2 lines)")
+               (buffer-string))))))
+
+(ert-deftest pi-coding-agent-test-hidden-thinking-preview-can-be-disabled ()
+  "Collapsed thinking can always use the generic hidden label when configured."
+  (let ((pi-coding-agent-thinking-display 'hidden)
+        (pi-coding-agent-thinking-hidden-preview nil))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta
+       "Crafting response style\nCheck examples\nPolish wording")
+      (pi-coding-agent--display-thinking-end "")
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote "> Thinking hidden… (3 lines)")
+                 text))
+        (should-not (string-match-p "Thinking: Crafting response style" text))))))
+
+(ert-deftest pi-coding-agent-test-visible-thinking-stays-expanded-on-end ()
+  "Visible mode keeps the completed thinking block expanded."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta "Need to double-check.")
+      (pi-coding-agent--display-thinking-end "")
+      (let ((text (buffer-string)))
+        (should (string-match-p "> Need to double-check\\." text))
+        (should-not (string-match-p
+                     (regexp-quote
+                      (pi-coding-agent-test--collapsed-thinking-stub
+                       "Need to double-check."))
+                     text))))))
+
+(ert-deftest pi-coding-agent-test-live-visible-thinking-end-stamps-toggle-metadata ()
+  "Completed live thinking in visible mode stays locally toggleable."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta "Need to double-check.")
+      (pi-coding-agent--display-thinking-end "")
+      (goto-char (point-min))
+      (search-forward "Need to double-check.")
+      (beginning-of-line)
+      (should (numberp (get-text-property (point)
+                                          'pi-coding-agent-thinking-block)))
+      (pi-coding-agent-toggle-tool-section)
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (pi-coding-agent-test--collapsed-thinking-stub
+                   "Need to double-check."))
+                 text))
+        (should-not (string-match-p "> Need to double-check\\." text))))))
+
+(ert-deftest pi-coding-agent-test-hidden-thinking-collapse-keeps-blank-line-separators ()
+  "Collapsing completed thinking should keep stable blank-line separation."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-message-delta "Answer first.")
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta "Need to double-check.")
+      (pi-coding-agent--display-thinking-end "")
+      (pi-coding-agent--display-message-delta "Final answer.")
+      (let* ((text (buffer-string))
+             (stub (pi-coding-agent-test--collapsed-thinking-stub
+                    "Need to double-check."))
+             (answer-pos (string-match "Answer first\\." text))
+             (stub-pos (string-match (regexp-quote stub) text))
+             (final-pos (string-match "Final answer\\." text)))
+        (should answer-pos)
+        (should stub-pos)
+        (should final-pos)
+        (should (< answer-pos stub-pos final-pos))
+        (should (string-match-p
+                 (regexp-quote
+                  (concat "Answer first.\n\n"
+                          stub
+                          "\n\nFinal answer."))
+                 text))
+        (should-not (string-match-p "\\n\\n\\n" text))))))
+
+(ert-deftest pi-coding-agent-test-toggle-thinking-display-during-streaming-defers-rebuild ()
+  "Streaming toggles keep live thinking visible and apply on completion."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (setq pi-coding-agent--status 'streaming)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta "Live reasoning")
+      (let ((before (buffer-string))
+            (marker pi-coding-agent--thinking-marker))
+        (cl-letf (((symbol-function 'message) #'ignore))
+          (pi-coding-agent-toggle-thinking-display))
+        (should (eq pi-coding-agent--thinking-display 'hidden))
+        (should (equal before (buffer-string)))
+        (should (eq marker pi-coding-agent--thinking-marker))
+        (should (marker-buffer pi-coding-agent--thinking-marker)))
+      (pi-coding-agent--display-thinking-end "")
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (pi-coding-agent-test--collapsed-thinking-stub
+                   "Live reasoning"))
+                 text))
+        (should-not (string-match-p "> Live reasoning" text))))))
 
 (ert-deftest pi-coding-agent-test-thinking-normalization-preserves-first-line-indentation ()
   "Normalization should trim blank boundaries without stripping indentation."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--display-agent-start)
-    (pi-coding-agent--display-thinking-start)
-    (pi-coding-agent--display-thinking-delta "\n\n  indented thought")
-    (pi-coding-agent--display-thinking-end "")
-    (should (string-match-p "^>   indented thought" (buffer-string)))))
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta "\n\n  indented thought")
+      (pi-coding-agent--display-thinking-end "")
+      (should (string-match-p "^>   indented thought" (buffer-string))))))
 
 (ert-deftest pi-coding-agent-test-thinking-whitespace-only-delta-does-not-rewrite-buffer ()
   "Adding ignorable trailing whitespace should not rewrite rendered thinking."
@@ -217,65 +379,68 @@ because it inserts at the end, while a full rewrite would lose it."
 
 (ert-deftest pi-coding-agent-test-thinking-paragraph-spacing-no-runaway-blank-lines ()
   "Thinking paragraphs keep a single readable separator, not multiple blanks."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--display-agent-start)
-    (pi-coding-agent--display-thinking-start)
-    (pi-coding-agent--display-thinking-delta
-     "First paragraph.\n\n\n\nSecond paragraph.")
-    (pi-coding-agent--display-thinking-end "")
-    (goto-char (point-min))
-    (should-not (re-search-forward "^>\\s-*$\n>\\s-*$" nil t))
-    (should (string-match-p "> First paragraph\\.\n>\\s-*\n> Second paragraph\\."
-                            (buffer-string)))))
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta
+       "First paragraph.\n\n\n\nSecond paragraph.")
+      (pi-coding-agent--display-thinking-end "")
+      (goto-char (point-min))
+      (should-not (re-search-forward "^>\\s-*$\n>\\s-*$" nil t))
+      (should (string-match-p "> First paragraph\\.\n>\\s-*\n> Second paragraph\\."
+                              (buffer-string))))))
 
 (ert-deftest pi-coding-agent-test-thinking-interleaved-with-tool-has-stable-spacing ()
   "Interleaving thinking and tool events keeps one blank line separation."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--handle-display-event '(:type "agent_start"))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_start" :message (:role "assistant")))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_start")))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
-       :message (:role "assistant"
-                 :content [(:type "toolCall" :id "call_1" :name "read"
-                            :arguments (:path "/tmp/AGENTS.md"))])))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_delta"
-                               :delta "Reviewing docs")))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_end" :content "")))
-    (let ((text (buffer-string)))
-      (should (string-match-p "Reviewing docs\n\nread /tmp/AGENTS\\.md" text))
-      (should-not (string-match-p "Reviewing docs\n\n\n" text)))))
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_start")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+         :message (:role "assistant"
+                   :content [(:type "toolCall" :id "call_1" :name "read"
+                              :arguments (:path "/tmp/AGENTS.md"))])))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_delta"
+                                 :delta "Reviewing docs")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_end" :content "")))
+      (let ((text (buffer-string)))
+        (should (string-match-p "Reviewing docs\n\nread /tmp/AGENTS\\.md" text))
+        (should-not (string-match-p "Reviewing docs\n\n\n" text))))))
 
 (ert-deftest pi-coding-agent-test-thinking-after-text-has-blank-line-separator ()
   "Second thinking block after text delta is separated by blank line."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--display-agent-start)
-    ;; First thinking block
-    (pi-coding-agent--display-thinking-start)
-    (pi-coding-agent--display-thinking-delta "First thought.")
-    (pi-coding-agent--display-thinking-end "")
-    ;; Text between blocks
-    (pi-coding-agent--display-message-delta "Here is my answer.")
-    ;; Second thinking block
-    (pi-coding-agent--display-thinking-start)
-    (pi-coding-agent--display-thinking-delta "Second thought.")
-    (pi-coding-agent--display-thinking-end "")
-    (let ((text (buffer-string)))
-      ;; The > must start on its own line, separated by blank line from text
-      (should (string-match-p "my answer\\.\n\n> Second thought\\." text))
-      ;; The > must NOT be glued to the text
-      (should-not (string-match-p "my answer\\.>" text)))))
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-agent-start)
+      ;; First thinking block
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta "First thought.")
+      (pi-coding-agent--display-thinking-end "")
+      ;; Text between blocks
+      (pi-coding-agent--display-message-delta "Here is my answer.")
+      ;; Second thinking block
+      (pi-coding-agent--display-thinking-start)
+      (pi-coding-agent--display-thinking-delta "Second thought.")
+      (pi-coding-agent--display-thinking-end "")
+      (let ((text (buffer-string)))
+        ;; The > must start on its own line, separated by blank line from text
+        (should (string-match-p "my answer\\.\n\n> Second thought\\." text))
+        ;; The > must NOT be glued to the text
+        (should-not (string-match-p "my answer\\.>" text))))))
 
 (ert-deftest pi-coding-agent-test-thinking-delta-allows-syntax-propertize ()
   "Thinking deltas allow refontification after rewriting blockquote content.
@@ -364,6 +529,491 @@ agent_end + next section's leading newline must not create triple newlines."
     (should-not (string-match-p "\n\n\n" (buffer-string)))))
 
 ;;; History Display
+
+(ert-deftest pi-coding-agent-test-history-renders-user-string-content ()
+  "Session history handles user messages stored as plain strings."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-history-messages
+     (vector (list :role "user"
+                   :content "Plain string prompt"
+                   :timestamp 1704067200000)))
+    (let ((text (buffer-string)))
+      (should (string-match-p "You" text))
+      (should (string-match-p "Plain string prompt" text)))))
+
+(ert-deftest pi-coding-agent-test-history-renders-assistant-string-content ()
+  "Session history handles assistant messages stored as plain strings."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-history-messages
+     (vector (list :role "assistant"
+                   :content "Plain string reply"
+                   :timestamp 1704067200000)))
+    (let ((text (buffer-string)))
+      (should (string-match-p "Assistant" text))
+      (should (string-match-p "Plain string reply" text)))))
+
+(ert-deftest pi-coding-agent-test-history-replays-assistant-thinking-after-text ()
+  "Session history replays assistant thinking blocks after preceding text."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((messages [(:role "assistant"
+                        :content [(:type "text" :text "Answer first.")
+                                  (:type "thinking" :thinking "Need to double-check.")]
+                        :timestamp 1704067200000)]))
+        (pi-coding-agent--display-history-messages messages))
+      (let* ((text (buffer-string))
+             (answer-pos (string-match "Answer first\\." text))
+             (thinking-pos (string-match "> Need to double-check\\." text)))
+        (should answer-pos)
+        (should thinking-pos)
+        (should (< answer-pos thinking-pos))))))
+
+(ert-deftest pi-coding-agent-test-history-replays-thinking-like-live-rendering ()
+  "Session replay uses the same visible thinking rendering as the live path."
+  (let ((raw-thinking "\n\nFirst paragraph.\n\n\n\nSecond paragraph.\n\n"))
+    (should
+     (equal
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--display-agent-start)
+        (pi-coding-agent--display-thinking-start)
+        (pi-coding-agent--display-thinking-delta raw-thinking)
+        (pi-coding-agent--display-thinking-end "")
+        (buffer-string))
+      (with-temp-buffer
+        (pi-coding-agent-chat-mode)
+        (pi-coding-agent--display-history-messages
+         (vector (list :role "assistant"
+                       :content (vector (list :type "thinking"
+                                              :thinking raw-thinking))
+                       :timestamp 1704067200000)))
+        (buffer-string))))))
+
+(ert-deftest pi-coding-agent-test-history-hides-completed-thinking-when-display-hidden ()
+  "Session replay collapses completed thinking when the buffer display is hidden."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-history-messages
+       (vector (list :role "assistant"
+                     :content (vector (list :type "text" :text "Answer first.")
+                                      (list :type "thinking"
+                                            :thinking "Need to double-check."))
+                     :timestamp 1704067200000)))
+      (let ((text (buffer-string)))
+        (should (string-match-p "Answer first\\." text))
+        (should (string-match-p
+                 (regexp-quote
+                  (pi-coding-agent-test--collapsed-thinking-stub
+                   "Need to double-check."))
+                 text))
+        (should-not (string-match-p "> Need to double-check\\." text))))))
+
+(ert-deftest pi-coding-agent-test-display-session-history-renders-custom-messages ()
+  "Session history replay should preserve visible custom messages."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-session-history
+     [(:role "user"
+       :content [(:type "text" :text "Question?")]
+       :timestamp 1704067200000)
+      (:role "assistant"
+       :content [(:type "text" :text "First answer.")]
+       :timestamp 1704067201000)
+      (:role "custom"
+       :display t
+       :content "Extension note: persisted custom message"
+       :timestamp 1704067201500)
+      (:role "assistant"
+       :content [(:type "text" :text "Second answer.")]
+       :timestamp 1704067202000)]
+     (current-buffer))
+    (let* ((text (buffer-string))
+           (first-pos (string-match "First answer\\." text))
+           (custom-pos (string-match "Extension note: persisted custom message" text))
+           (second-pos (string-match "Second answer\\." text)))
+      (should (string-match-p "Question\\?" text))
+      (should first-pos)
+      (should custom-pos)
+      (should second-pos)
+      (should (< first-pos custom-pos))
+      (should (< custom-pos second-pos)))))
+
+(defun pi-coding-agent-test--history-with-toggleable-thinking ()
+  "Return history containing text, thinking, and a collapsed tool block."
+  [(:role "assistant"
+    :content [(:type "text" :text "Answer first.")
+              (:type "thinking"
+               :thinking "Need to double-check.\n\nSecond paragraph.")
+              (:type "text" :text "Final answer.")
+              (:type "toolCall" :id "call_1"
+               :name "read"
+               :arguments (:path "example.txt"))]
+    :timestamp 1704067200000)
+   (:role "toolResult" :toolCallId "call_1"
+    :toolName "read"
+    :content [(:type "text"
+               :text "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11\nL12")]
+    :isError :json-false
+    :timestamp 1704067201000)])
+
+(defun pi-coding-agent-test--collapsed-thinking-stub (text)
+  "Return the hidden stub shown for completed thinking TEXT."
+  (pi-coding-agent--thinking-hidden-stub
+   (pi-coding-agent--thinking-normalize-text text)))
+
+(defun pi-coding-agent-test--long-thinking-text (&optional count)
+  "Return COUNT lines of long thinking text."
+  (mapconcat (lambda (n)
+               (format "thinking line %03d: %s" n (make-string 40 ?x)))
+             (number-sequence 1 (or count 120))
+             "\n"))
+
+(defun pi-coding-agent-test--tail-screen-lines (window)
+  "Return screen lines from WINDOW start through buffer end."
+  (with-current-buffer (window-buffer window)
+    (max 0 (count-screen-lines (window-start window)
+                               (point-max)
+                               nil
+                               window))))
+
+(defun pi-coding-agent-test--window-mostly-filled-p (window)
+  "Return non-nil when WINDOW has at most one blank row after buffer end."
+  (>= (pi-coding-agent-test--tail-screen-lines window)
+      (1- (window-body-height window))))
+
+(defun pi-coding-agent-test--window-shows-tail-p (window)
+  "Return non-nil when WINDOW shows the current buffer tail."
+  (with-current-buffer (window-buffer window)
+    (>= (window-end window t) (point-max))))
+
+(defun pi-coding-agent-test--window-start-line (window)
+  "Return visible text on WINDOW's start line."
+  (with-current-buffer (window-buffer window)
+    (save-excursion
+      (goto-char (window-start window))
+      (buffer-substring-no-properties
+       (line-beginning-position)
+       (line-end-position)))))
+
+(defun pi-coding-agent-test--setup-long-live-thinking (buffer display)
+  "Populate BUFFER with history and a long live thinking block using DISPLAY."
+  (with-current-buffer buffer
+    (pi-coding-agent-chat-mode)
+    (setq pi-coding-agent--thinking-display display)
+    (let ((inhibit-read-only t))
+      (dotimes (i 80)
+        (insert (format "previous history line %03d\n" (1+ i)))))
+    (pi-coding-agent--display-agent-start)
+    (pi-coding-agent--display-thinking-start)
+    (pi-coding-agent--display-thinking-delta
+     (pi-coding-agent-test--long-thinking-text))))
+
+(defmacro pi-coding-agent-test--with-long-live-thinking-buffer (spec &rest body)
+  "Run BODY with a buffer containing long live thinking.
+SPEC has the form (BUFFER DISPLAY).  BUFFER is bound to the temporary buffer,
+and DISPLAY controls how completed thinking is rendered."
+  (declare (indent 1) (debug t))
+  (let ((buffer (car spec))
+        (display (cadr spec)))
+    `(let ((,buffer (generate-new-buffer " *pi-long-live-thinking*")))
+       (unwind-protect
+           (progn
+             (pi-coding-agent-test--setup-long-live-thinking ,buffer ,display)
+             ,@body)
+         (when (buffer-live-p ,buffer)
+           (kill-buffer ,buffer))))))
+
+(ert-deftest pi-coding-agent-test-tab-expands-completed-thinking-stub ()
+  "TAB on a hidden completed-thinking stub expands that block."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-session-history
+       (pi-coding-agent-test--history-with-toggleable-thinking)
+       (current-buffer))
+      (goto-char (point-min))
+      (search-forward (pi-coding-agent-test--collapsed-thinking-stub
+                       "Need to double-check.\n\nSecond paragraph."))
+      (beginning-of-line)
+      (pi-coding-agent-toggle-tool-section)
+      (let ((text (buffer-string)))
+        (should (string-match-p "^> Need to double-check\\.$" text))
+        (should (string-match-p "^> Second paragraph\\.$" text))
+        (should-not (string-match-p
+                     (regexp-quote
+                      (pi-coding-agent-test--collapsed-thinking-stub
+                       "Need to double-check.\n\nSecond paragraph."))
+                     text))))))
+
+(ert-deftest pi-coding-agent-test-tab-collapses-expanded-completed-thinking-block ()
+  "TAB inside an expanded completed-thinking block collapses it again."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-session-history
+       (pi-coding-agent-test--history-with-toggleable-thinking)
+       (current-buffer))
+      (goto-char (point-min))
+      (search-forward (pi-coding-agent-test--collapsed-thinking-stub
+                       "Need to double-check.\n\nSecond paragraph."))
+      (beginning-of-line)
+      (pi-coding-agent-toggle-tool-section)
+      (search-forward "Second paragraph.")
+      (beginning-of-line)
+      (pi-coding-agent-toggle-tool-section)
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (pi-coding-agent-test--collapsed-thinking-stub
+                   "Need to double-check.\n\nSecond paragraph."))
+                 text))
+        (should-not (string-match-p "^> Need to double-check\\.$" text))
+        (should-not (string-match-p "^> Second paragraph\\.$" text))))))
+
+(ert-deftest pi-coding-agent-test-thinking-toggle-wins-before-tool-or-outline ()
+  "TAB inside completed thinking toggles thinking without touching tools or outline."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-session-history
+       (pi-coding-agent-test--history-with-toggleable-thinking)
+       (current-buffer))
+      (let ((outline-called nil))
+        (goto-char (point-min))
+        (search-forward (pi-coding-agent-test--collapsed-thinking-stub
+                         "Need to double-check.\n\nSecond paragraph."))
+        (beginning-of-line)
+        (cl-letf (((symbol-function 'outline-cycle)
+                   (lambda (&rest _) (setq outline-called t))))
+          (pi-coding-agent-toggle-tool-section))
+        (let ((text (buffer-string)))
+          (should-not outline-called)
+          (should (string-match-p "Answer first\\." text))
+          (should (string-match-p "Final answer\\." text))
+          (should (string-match-p "^> Need to double-check\\.$" text))
+          (should (string-match-p "\\.\\.\\. ([0-9]+ more lines)" text))
+          (should-not (string-match-p "L12" text)))))))
+
+(ert-deftest pi-coding-agent-test-rerender-clears-temporary-thinking-expansion ()
+  "A canonical-history rebuild resets manual thinking expansion."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-session-history
+       (pi-coding-agent-test--history-with-toggleable-thinking)
+       (current-buffer))
+      (goto-char (point-min))
+      (search-forward (pi-coding-agent-test--collapsed-thinking-stub
+                       "Need to double-check.\n\nSecond paragraph."))
+      (beginning-of-line)
+      (pi-coding-agent-toggle-tool-section)
+      (should (string-match-p "^> Need to double-check\\.$" (buffer-string)))
+      (pi-coding-agent--rerender-canonical-history)
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 (regexp-quote
+                  (pi-coding-agent-test--collapsed-thinking-stub
+                   "Need to double-check.\n\nSecond paragraph."))
+                 text))
+        (should-not (string-match-p "^> Need to double-check\\.$" text))))))
+
+(ert-deftest pi-coding-agent-test-thinking-toggle-preserves-window-start-before-block ()
+  "Thinking toggles keep a window anchored when it was scrolled before the block."
+  (let ((pi-coding-agent-thinking-display 'hidden)
+        (buf (generate-new-buffer " *pi-thinking-toggle-scroll*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (pi-coding-agent-chat-mode)
+            (pi-coding-agent--display-session-history
+             (pi-coding-agent-test--history-with-toggleable-thinking)
+             buf))
+          (let ((win (display-buffer buf)))
+            (with-selected-window win
+              (goto-char (point-min))
+              (recenter 0)
+              (let ((start-before (window-start win)))
+                (search-forward (pi-coding-agent-test--collapsed-thinking-stub
+                                 "Need to double-check.\n\nSecond paragraph."))
+                (beginning-of-line)
+                (pi-coding-agent-toggle-tool-section)
+                (should (= (window-start win) start-before))))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest pi-coding-agent-test-hidden-thinking-end-keeps-tail-window-filled ()
+  "Collapsing long live thinking keeps a tail-following window filled."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'hidden)
+      (let ((win (display-buffer buf)))
+        (with-selected-window win
+          (goto-char (point-max))
+          (recenter -1)
+          (should (pi-coding-agent-test--window-mostly-filled-p win))
+          (pi-coding-agent--display-thinking-end "")
+          (should (pi-coding-agent-test--window-shows-tail-p win))
+          (should (pi-coding-agent-test--window-mostly-filled-p win)))))))
+
+(ert-deftest pi-coding-agent-test-thinking-tab-collapse-keeps-tail-window-filled ()
+  "Collapsing completed thinking with TAB keeps a tail view filled."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'visible)
+      (with-current-buffer buf
+        (pi-coding-agent--display-thinking-end ""))
+      (let ((win (display-buffer buf)))
+        (with-selected-window win
+          (goto-char (point-max))
+          (recenter -1)
+          (should (pi-coding-agent-test--window-mostly-filled-p win))
+          (search-backward "thinking line 120")
+          (pi-coding-agent-toggle-tool-section)
+          (should (pi-coding-agent-test--window-shows-tail-p win))
+          (should (pi-coding-agent-test--window-mostly-filled-p win)))))))
+
+(ert-deftest pi-coding-agent-test-tab-collapse-preserves-window-after-thinking-block ()
+  "Collapsing thinking keeps other windows anchored after the replaced block."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'visible)
+      (save-window-excursion
+        (with-current-buffer buf
+          (pi-coding-agent--display-thinking-end "")
+          (let ((inhibit-read-only t))
+            (goto-char (point-max))
+            (dotimes (i 120)
+              (insert (format "after line %03d\n" (1+ i))))))
+        (let* ((reader (display-buffer buf))
+               (toggle (split-window reader nil 'right)))
+          (set-window-buffer toggle buf)
+          (with-selected-window reader
+            (goto-char (point-min))
+            (search-forward "after line 050")
+            (beginning-of-line)
+            (set-window-start reader (point) t)
+            (set-window-point reader (point)))
+          (let ((start-line-before
+                 (pi-coding-agent-test--window-start-line reader)))
+            (with-selected-window toggle
+              (goto-char (point-min))
+              (search-forward "thinking line 120")
+              (pi-coding-agent-toggle-tool-section))
+            (should (equal (pi-coding-agent-test--window-start-line reader)
+                           start-line-before))))))))
+
+(ert-deftest pi-coding-agent-test-live-thinking-end-keeps-inspected-block-visible ()
+  "Collapsing live thinking maps an inspected live block to its completed stub."
+  (let ((pi-coding-agent-thinking-display 'hidden))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'hidden)
+      (let ((win (display-buffer buf)))
+        (with-selected-window win
+          (goto-char (point-min))
+          (search-forward "thinking line 060")
+          (beginning-of-line)
+          (recenter 0)
+          (pi-coding-agent--display-thinking-end "")
+          (let ((visible (buffer-substring-no-properties
+                          (window-start win)
+                          (window-end win t))))
+            (should (string-match-p "Thinking:" visible))
+            (should (pi-coding-agent-test--window-mostly-filled-p win))))))))
+
+(ert-deftest pi-coding-agent-test-chat-thinking-display-preserves-window-after-earlier-block ()
+  "Whole-chat thinking display changes keep later reading windows anchored."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (pi-coding-agent-test--with-long-live-thinking-buffer (buf 'visible)
+      (with-current-buffer buf
+        (pi-coding-agent--display-thinking-end "")
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (dotimes (i 120)
+            (insert (format "after line %03d\n" (1+ i))))))
+      (let ((win (display-buffer buf)))
+        (with-selected-window win
+          (goto-char (point-min))
+          (search-forward "after line 050")
+          (beginning-of-line)
+          (set-window-start win (point) t)
+          (set-window-point win (point)))
+        (let ((start-line-before
+               (pi-coding-agent-test--window-start-line win)))
+          (with-current-buffer buf
+            (cl-letf (((symbol-function 'message) #'ignore))
+              (pi-coding-agent--set-chat-thinking-display 'hidden)))
+          (should (equal (pi-coding-agent-test--window-start-line win)
+                         start-line-before)))))))
+
+(ert-deftest pi-coding-agent-test-chat-thinking-display-noop-preserves-window-start ()
+  "A no-op whole-chat thinking display change does not move the viewport."
+  (let ((pi-coding-agent-thinking-display 'hidden)
+        (buf (generate-new-buffer " *pi-thinking-display-noop-scroll*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (pi-coding-agent-chat-mode)
+            (setq pi-coding-agent--thinking-display 'hidden)
+            (let ((inhibit-read-only t))
+              (dotimes (i 120)
+                (insert (format "plain line %03d\n" (1+ i))))))
+          (let ((win (display-buffer buf)))
+            (with-selected-window win
+              (goto-char (point-min))
+              (search-forward "plain line 050")
+              (beginning-of-line)
+              (set-window-start win (point) t)
+              (set-window-point win (point)))
+            (let ((start-before (window-start win)))
+              (with-current-buffer buf
+                (cl-letf (((symbol-function 'message) #'ignore))
+                  (pi-coding-agent--set-chat-thinking-display 'hidden)))
+              (should (= (window-start win) start-before)))))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
+(ert-deftest pi-coding-agent-test-tab-falls-back-to-outline-when-not-on-section ()
+  "TAB still falls back to outline cycling outside thinking and tool sections."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (let ((inhibit-read-only t)
+          (outline-called nil))
+      (insert "Assistant\n=========\n\nPlain answer.\n")
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'outline-cycle)
+                 (lambda (&rest _) (setq outline-called t))))
+        (pi-coding-agent-toggle-tool-section))
+      (should outline-called))))
+
+(ert-deftest pi-coding-agent-test-history-preserves-assistant-block-order ()
+  "Session replay keeps assistant text, thinking, and tools in source order."
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((messages [(:role "assistant"
+                        :content [(:type "text" :text "First answer.")
+                                  (:type "thinking" :thinking "Need to inspect.")
+                                  (:type "text" :text "Second answer.")
+                                  (:type "toolCall" :id "tc1"
+                                   :name "read"
+                                   :arguments (:path "foo.el"))]
+                        :timestamp 1704067200000)
+                       (:role "toolResult" :toolCallId "tc1"
+                        :toolName "read"
+                        :content [(:type "text" :text "(defun foo ())")]
+                        :isError :json-false
+                        :timestamp 1704067201000)]))
+        (pi-coding-agent--display-history-messages messages))
+      (let* ((text (buffer-string))
+             (first-pos (string-match "First answer\\." text))
+             (thinking-pos (string-match "> Need to inspect\\." text))
+             (second-pos (string-match "Second answer\\." text))
+             (tool-pos (string-match "read foo\\.el" text)))
+        (should first-pos)
+        (should thinking-pos)
+        (should second-pos)
+        (should tool-pos)
+        (should (< first-pos thinking-pos second-pos tool-pos))))))
 
 (ert-deftest pi-coding-agent-test-history-renders-tool-with-output ()
   "Tool calls in history render with header and output, not just a count."
@@ -620,6 +1270,28 @@ agent_end + next section's leading newline must not create triple newlines."
     ;; Mock window-point to return position before end
     (cl-letf (((symbol-function 'window-point) (lambda (_w) 1)))
       (should-not (pi-coding-agent--window-following-p 'mock-window)))))
+
+(ert-deftest pi-coding-agent-test-rewrite-tail-window-p-keeps-lower-tail-view-following ()
+  "A lower-window tail view should stay in tail-following mode after a rewrite."
+  (should (pi-coding-agent--rewrite-tail-window-p 10 99 100 18 30))
+  (should (pi-coding-agent--rewrite-tail-window-p 99 50 100 5 30))
+  (should-not (pi-coding-agent--rewrite-tail-window-p 10 50 100 18 30)))
+
+(ert-deftest pi-coding-agent-test-rewrite-tail-window-p-keeps-mid-buffer-context-when-tall-window-shows-tail ()
+  "A tall window showing the tail should not outrank an in-view mid-buffer point."
+  (should-not (pi-coding-agent--rewrite-tail-window-p 60 199 200 10 36)))
+
+(ert-deftest pi-coding-agent-test-rewrite-tail-window-p-ignores-offscreen-point ()
+  "A stale tail-reaching window end should not make an offscreen point follow."
+  (should-not (pi-coding-agent--rewrite-tail-window-p 60 199 200 14 11)))
+
+(ert-deftest pi-coding-agent-test-clamp-rewrite-point-row-pushes-point-lower-when-tail-shrinks ()
+  "Shrinking the tail should move point lower so the rewritten window stays filled."
+  (should (= 12 (pi-coding-agent--clamp-rewrite-point-row 3 40 8 20))))
+
+(ert-deftest pi-coding-agent-test-clamp-rewrite-point-row-falls-back-when-buffer-too-short ()
+  "When the whole buffer is shorter than the window, preserve the highest visible row."
+  (should (= 5 (pi-coding-agent--clamp-rewrite-point-row 10 5 8 20))))
 
 ;;; Pandoc Conversion
 
@@ -973,6 +1645,18 @@ since we don't display them locally. Let pi's message_start handle it."
     (should (string-match-p "Error:" (buffer-string)))
     (should (string-match-p "unknown" (buffer-string)))))
 
+(ert-deftest pi-coding-agent-test-display-startup-error ()
+  "Startup failures should show the error and stderr excerpt."
+  (with-temp-buffer
+    (pi-coding-agent-chat-mode)
+    (pi-coding-agent--display-startup-error
+     "Process exited: exited abnormally with code 1"
+     "InvalidArgumentError: Invalid URL protocol")
+    (should (string-match-p "failed to start" (buffer-string)))
+    (should (string-match-p "exited abnormally" (buffer-string)))
+    (should (string-match-p "InvalidArgumentError" (buffer-string)))
+    (should (string-match-p "stderr" (buffer-string)))))
+
 (ert-deftest pi-coding-agent-test-display-extension-error ()
   "extension_error event shows extension name and error."
   (with-temp-buffer
@@ -1252,9 +1936,13 @@ since we don't display them locally. Let pi's message_start handle it."
 (ert-deftest pi-coding-agent-test-extension-ui-unsupported-warns ()
   "Unsupported extension_ui_request method warns via `message'.
 See https://github.com/dnouri/pi-coding-agent/issues/176."
-  (let (messages-logged response-sent)
+  (let (warnings-logged response-sent)
     (cl-letf (((symbol-function 'message)
-               (lambda (fmt &rest args) (push (apply #'format fmt args) messages-logged)))
+               (lambda (fmt &rest args)
+                 (when fmt
+                   (let ((msg (apply #'format fmt args)))
+                     (when (string-match-p "extension UI method" msg)
+                       (push msg warnings-logged))))))
               ((symbol-function 'pi-coding-agent--send-extension-ui-response)
                (lambda (_proc resp) (setq response-sent resp))))
       (with-temp-buffer
@@ -1264,12 +1952,87 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
            '(:type "extension_ui_request"
              :id "req-unknown"
              :method "someNewFancyWidget")))))
-    ;; Should warn the user
     (should (cl-some (lambda (m) (string-match-p "someNewFancyWidget" m))
-                     messages-logged))
-    ;; Should still send cancelled so the extension doesn't hang
+                     warnings-logged))
+    ;; Unknown methods may be future dialogs, so they are cancelled.
     (should response-sent)
-    (should (equal (plist-get response-sent :cancelled) t))))
+    (should (eq (plist-get response-sent :cancelled) t))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-unsupported-warns-once-per-method ()
+  "Repeated unsupported extension_ui_request methods warn once per method."
+  (let (warnings-logged responses-sent)
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (when fmt
+                     (let ((msg (apply #'format fmt args)))
+                       (when (string-match-p "extension UI method" msg)
+                         (push msg warnings-logged))))))
+                ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+                 (lambda (_proc resp) (push resp responses-sent))))
+        (let ((pi-coding-agent--process t))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-widget-1"
+             :method "setWidget"
+             :widgetKey "my-ext"
+             :widgetLines ["Line 1"]))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-widget-2"
+             :method "setWidget"
+             :widgetKey "my-ext"
+             :widgetLines ["Line 2"]))
+          (pi-coding-agent--handle-extension-ui-request
+           '(:type "extension_ui_request"
+             :id "req-title"
+             :method "setTitle"
+             :title "pi - project")))))
+    (should (= (length warnings-logged) 2))
+    (should (= 1 (cl-count-if (lambda (m) (string-match-p "setWidget" m))
+                              warnings-logged)))
+    (should (= 1 (cl-count-if (lambda (m) (string-match-p "setTitle" m))
+                              warnings-logged)))
+    ;; setWidget and setTitle are fire-and-forget RPC methods.
+    (should (null responses-sent))))
+
+(ert-deftest pi-coding-agent-test-extension-ui-unsupported-warnings-are-buffer-local ()
+  "Unsupported extension UI warning dedupe is isolated by chat buffer."
+  (let ((buf-a (generate-new-buffer "*test-extension-ui-a*"))
+        (buf-b (generate-new-buffer "*test-extension-ui-b*"))
+        warnings-logged)
+    (unwind-protect
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (when fmt
+                       (let ((msg (apply #'format fmt args)))
+                         (when (string-match-p "extension UI method" msg)
+                           (push msg warnings-logged))))))
+                  ((symbol-function 'pi-coding-agent--send-extension-ui-response)
+                   #'ignore))
+          (dolist (buf (list buf-a buf-b))
+            (with-current-buffer buf
+              (pi-coding-agent-chat-mode)
+              (let ((pi-coding-agent--process t))
+                (pi-coding-agent--handle-extension-ui-request
+                 '(:type "extension_ui_request"
+                   :id "req-widget"
+                   :method "setWidget"
+                   :widgetKey "my-ext"
+                   :widgetLines ["Line 1"])))))
+          (with-current-buffer buf-a
+            (let ((pi-coding-agent--process t))
+              (pi-coding-agent--handle-extension-ui-request
+               '(:type "extension_ui_request"
+                 :id "req-widget-again"
+                 :method "setWidget"
+                 :widgetKey "my-ext"
+                 :widgetLines ["Line 2"]))))
+          (should (= 2 (cl-count-if (lambda (m) (string-match-p "setWidget" m))
+                                    warnings-logged))))
+      (when (buffer-live-p buf-a) (kill-buffer buf-a))
+      (when (buffer-live-p buf-b) (kill-buffer buf-b)))))
 
 (ert-deftest pi-coding-agent-test-header-format-extension-status ()
   "Extension status formatter returns inline neutral status text without pipe."
@@ -1303,9 +2066,7 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
           (pi-coding-agent--handle-extension-ui-request
            '(:type "extension_ui_request"
              :id "req-9"
-             :method "setWidget"
-             :widgetKey "my-ext"
-             :widgetLines ["Line 1"])))
+             :method "someNewFancyWidget")))
         (should response-sent)
         (should (equal (plist-get response-sent :type) "extension_ui_response"))
         (should (equal (plist-get response-sent :id) "req-9"))
@@ -1457,12 +2218,12 @@ See https://github.com/dnouri/pi-coding-agent/issues/176."
 
 (ert-deftest pi-coding-agent-test-builtin-tools-unaffected-by-generic-header ()
   "Built-in tools still use their specialized header formats."
-  ;; bash: still "$ command"
-  (let ((header (pi-coding-agent--tool-header "bash" '(:command "ls -la"))))
+  (let ((header (pi-coding-agent--tool-header
+                 "bash" '(:command "ls -la") 'streaming)))
     (should (string-prefix-p "$ " (substring-no-properties header))))
-  ;; read/write/edit: still "tool path"
   (dolist (tool '("read" "write" "edit"))
-    (let ((header (pi-coding-agent--tool-header tool '(:path "foo.txt"))))
+    (let ((header (pi-coding-agent--tool-header
+                   tool '(:path "foo.txt") 'streaming)))
       (should (string-prefix-p (concat tool " foo.txt")
                                (substring-no-properties header))))))
 
@@ -2371,17 +3132,23 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
                     (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
 
 (ert-deftest pi-coding-agent-test-apply-diff-overlays-removed-line ()
-  "Diff overlays should mark removed lines with diff-removed faces."
+  "Diff overlays should mark removed lines with indicator and line faces."
   (with-temp-buffer
     ;; Use actual pi format: -<space><padded-linenum><space><code>
     (insert "-12     removed line\n")
     (pi-coding-agent--apply-diff-overlays (point-min) (point-max))
     (goto-char (point-min))
-    (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
-                           (overlays-at (point)))))
-      (should ovs)
+    (let ((indicator-ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                                     (overlays-at (point)))))
+      (should indicator-ovs)
       (should (memq 'diff-indicator-removed
-                    (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) indicator-ovs))))
+    (goto-char 9)
+    (let ((line-ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
+                                (overlays-at (point)))))
+      (should line-ovs)
+      (should (memq 'pi-coding-agent-diff-line-removed
+                    (mapcar (lambda (ov) (overlay-get ov 'face)) line-ovs))))))
 
 (ert-deftest pi-coding-agent-test-apply-diff-overlays-multiline ()
   "Diff overlays should handle multiple diff lines."
@@ -2396,7 +3163,7 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
       (should (= 4 (length all-ovs))))))
 
 (ert-deftest pi-coding-agent-test-apply-diff-overlays-line-background ()
-  "Diff overlays should apply background color to entire line."
+  "Diff overlays should apply the theme-derived line background face."
   (with-temp-buffer
     ;; Use actual pi format: "+ 7     def foo():"
     (insert "+ 7     def foo():\n")
@@ -2406,8 +3173,8 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
     (let ((ovs (seq-filter (lambda (ov) (overlay-get ov 'pi-coding-agent-diff-overlay))
                            (overlays-at (point)))))
       (should ovs)
-      ;; Should have diff-added face for background
-      (should (memq 'diff-added
+      ;; Should have the syntax-preserving diff-line face for background
+      (should (memq 'pi-coding-agent-diff-line-added
                     (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
 
 (ert-deftest pi-coding-agent-test-edit-tool-diff-uses-overlays ()
@@ -2436,6 +3203,31 @@ With hot-tail-turn-count 1, only the most recent headed turn stays hot."
                            (overlays-at (match-beginning 0)))))
       (should (memq 'diff-indicator-added
                     (mapcar (lambda (ov) (overlay-get ov 'face)) ovs))))))
+
+(ert-deftest pi-coding-agent-test-edit-tool-diff-keeps-syntax-face-under-diff-overlay ()
+  "Edit diff overlays should not remove syntax fontification from code tokens."
+  (let ((path (expand-file-name "pi-coding-agent-edit-diff-test.py"
+                                temporary-file-directory)))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--display-tool-start "edit" `(:path ,path))
+      (pi-coding-agent--display-tool-end
+       "edit"
+       `(:path ,path)
+       '((:type "text" :text "Edit successful"))
+       (list :diff "+ 1     def foo():\n+ 2         return 42\n- 3     def bar():")
+       nil)
+      (font-lock-ensure (point-min) (point-max))
+      (goto-char (point-min))
+      (should (search-forward "def" nil t))
+      (let* ((pos (match-beginning 0))
+             (syntax-face (get-text-property pos 'face))
+             (diff-faces (mapcar (lambda (ov) (overlay-get ov 'face))
+                                 (seq-filter (lambda (ov)
+                                               (overlay-get ov 'pi-coding-agent-diff-overlay))
+                                             (overlays-at pos)))))
+        (should syntax-face)
+        (should (memq 'pi-coding-agent-diff-line-added diff-faces))))))
 
 ;;; File Navigation (visit-file)
 
@@ -3363,6 +4155,14 @@ Regression test: streaming output with no newlines should still be capped."
   (when-let* ((block (gethash tool-call-id pi-coding-agent--live-tool-blocks)))
     (pi-coding-agent--tool-block-overlay block)))
 
+(defun pi-coding-agent-test--tool-header-by-id (tool-call-id)
+  "Return the plain header text for TOOL-CALL-ID."
+  (when-let* ((ov (pi-coding-agent-test--tool-block-overlay-by-id tool-call-id))
+              (header-end (overlay-get ov 'pi-coding-agent-header-end)))
+    (buffer-substring-no-properties
+     (overlay-start ov)
+     (1- (marker-position header-end)))))
+
 (defun pi-coding-agent-test--tool-stream-body-from-overlay (ov)
   "Return tool overlay OV body as plain text."
   (let ((header-end (overlay-get ov 'pi-coding-agent-header-end)))
@@ -3487,6 +4287,129 @@ authoritative args, header and overlay path are updated."
     (should (equal "/tmp/foo.py"
                    (overlay-get pi-coding-agent--pending-tool-overlay
                                 'pi-coding-agent-tool-path)))))
+
+(ert-deftest pi-coding-agent-test-generic-toolcall-streaming-skips-json ()
+  "Generic streaming previews show only the tool name."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "subagent" '(:agent "worker" :task "initial"))))
+    (dolist (task '("one" "two" "three"))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 0
+       (list (pi-coding-agent-test--toolcall
+              "call_1" "subagent"
+              (list :agent "worker"
+                    :task task
+                    :payload (make-string 32 ?x))))
+       "x"))
+    (should (equal "subagent"
+                   (pi-coding-agent-test--tool-header-by-id "call_1")))))
+
+(ert-deftest pi-coding-agent-test-generic-toolcall-end-restores-json-header ()
+  "toolcall_end restores the full generic JSON header synchronously."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "subagent" '(:agent "worker" :task "initial"))))
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_delta" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "subagent" '(:agent "worker" :task "final")))
+     "x")
+    (let ((before (buffer-substring-no-properties (point-min) (point-max))))
+      (should (equal "subagent"
+                     (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should-not (string-match-p "\"task\"" before)))
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_end" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "subagent" '(:agent "worker" :task "final"))))
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (= 1 (pi-coding-agent-test--count-matches
+                    "^subagent" content)))
+      (should (string-match-p
+               "\"agent\": \"worker\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (string-match-p
+               "\"task\": \"final\""
+               (pi-coding-agent-test--tool-header-by-id "call_1"))))))
+
+(ert-deftest pi-coding-agent-test-generic-toolcall-execution-start-restores-json-header ()
+  "tool_execution_start restores authoritative generic JSON args."
+  (pi-coding-agent-test--with-streaming-assistant
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_start" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "custom_generic_tool" nil)))
+    (pi-coding-agent-test--send-toolcall-message-update
+     "toolcall_delta" 0
+     (list (pi-coding-agent-test--toolcall
+            "call_1" "custom_generic_tool"
+            '(:agent "worker" :task "streaming")))
+     "x")
+    (let ((before (buffer-substring-no-properties (point-min) (point-max))))
+      (should (equal "custom_generic_tool"
+                     (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should-not (string-match-p "\"task\"" before)))
+    (pi-coding-agent--handle-display-event
+     '(:type "message_end" :message (:role "assistant")))
+    (pi-coding-agent--handle-display-event
+     '(:type "tool_execution_start"
+       :toolCallId "call_1"
+       :toolName "custom_generic_tool"
+       :args (:agent "worker" :task "authoritative")))
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p
+               "\"agent\": \"worker\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (string-match-p
+               "\"task\": \"authoritative\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (= 1 (pi-coding-agent-test--count-matches
+                    "^custom_generic_tool" content))))))
+
+(ert-deftest pi-coding-agent-test-generic-toolcall-end-finalizes-only-matching-preview ()
+  "toolcall_end finalizes only its content block's generic header."
+  (pi-coding-agent-test--with-streaming-assistant
+    (let ((toolcalls (list (pi-coding-agent-test--toolcall
+                            "call_1" "subagent"
+                            '(:agent "worker" :task "one"))
+                           (pi-coding-agent-test--toolcall
+                            "call_2" "custom_generic_tool"
+                            '(:agent "worker" :task "two")))))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 0 toolcalls)
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_start" 1 toolcalls)
+      (should (equal "subagent"
+                     (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (equal "custom_generic_tool"
+                     (pi-coding-agent-test--tool-header-by-id "call_2")))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_end" 0 toolcalls)
+      (should (string-match-p
+               "\"task\": \"one\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (equal "custom_generic_tool"
+                     (pi-coding-agent-test--tool-header-by-id "call_2")))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_delta" 1 toolcalls "x")
+      (should (string-match-p
+               "\"task\": \"one\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (equal "custom_generic_tool"
+                     (pi-coding-agent-test--tool-header-by-id "call_2")))
+      (pi-coding-agent-test--send-toolcall-message-update
+       "toolcall_end" 1 toolcalls)
+      (should (string-match-p
+               "\"task\": \"one\""
+               (pi-coding-agent-test--tool-header-by-id "call_1")))
+      (should (string-match-p
+               "\"task\": \"two\""
+               (pi-coding-agent-test--tool-header-by-id "call_2"))))))
 
 (ert-deftest pi-coding-agent-test-toolcall-start-creates-overlay ()
   "toolcall_start in message_update creates a keyed preview overlay."
@@ -4459,34 +5382,35 @@ Commands with embedded newlines should not have any lines deleted."
 
 (ert-deftest pi-coding-agent-test-thinking-rendered-as-blockquote ()
   "Thinking content renders as markdown blockquote."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--handle-display-event '(:type "agent_start"))
-    (pi-coding-agent--handle-display-event '(:type "message_start"))
-    ;; Thinking lifecycle: start -> delta -> end
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_start")))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_delta" :delta "Let me analyze this.")))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_end" :content "Let me analyze this.")))
-    ;; Then regular text
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "text_delta" :delta "Here is my answer.")))
-    ;; Complete the message (triggers rendering)
-    (pi-coding-agent--handle-display-event '(:type "message_end" :message (:role "assistant")))
-    ;; After rendering, thinking should be in a blockquote (> prefix)
-    (goto-char (point-min))
-    (should (search-forward "> Let me analyze this." nil t))
-    ;; Regular text should be outside the blockquote
-    (should (search-forward "Here is my answer." nil t))
-    ;; Should NOT have code fence markers
-    (goto-char (point-min))
-    (should-not (search-forward "```thinking" nil t))))
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event '(:type "message_start"))
+      ;; Thinking lifecycle: start -> delta -> end
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_start")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_delta" :delta "Let me analyze this.")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_end" :content "Let me analyze this.")))
+      ;; Then regular text
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "text_delta" :delta "Here is my answer.")))
+      ;; Complete the message (triggers rendering)
+      (pi-coding-agent--handle-display-event '(:type "message_end" :message (:role "assistant")))
+      ;; After rendering, thinking should be in a blockquote (> prefix)
+      (goto-char (point-min))
+      (should (search-forward "> Let me analyze this." nil t))
+      ;; Regular text should be outside the blockquote
+      (should (search-forward "Here is my answer." nil t))
+      ;; Should NOT have code fence markers
+      (goto-char (point-min))
+      (should-not (search-forward "```thinking" nil t)))))
 
 (ert-deftest pi-coding-agent-test-thinking-blockquote-has-face ()
   "Thinking blockquote has md-ts-block-quote after font-lock."
@@ -4504,24 +5428,25 @@ Commands with embedded newlines should not have any lines deleted."
 
 (ert-deftest pi-coding-agent-test-thinking-multiline-blockquote ()
   "Multi-line thinking content has > prefix on each line."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--handle-display-event '(:type "agent_start"))
-    (pi-coding-agent--handle-display-event '(:type "message_start"))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_start")))
-    ;; Multi-line thinking with newline in delta
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_delta" :delta "First line.\nSecond line.")))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_end" :content "")))
-    ;; Each line should have > prefix
-    (goto-char (point-min))
-    (should (search-forward "> First line." nil t))
-    (should (search-forward "> Second line." nil t))))
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event '(:type "message_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_start")))
+      ;; Multi-line thinking with newline in delta
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_delta" :delta "First line.\nSecond line.")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_end" :content "")))
+      ;; Each line should have > prefix
+      (goto-char (point-min))
+      (should (search-forward "> First line." nil t))
+      (should (search-forward "> Second line." nil t)))))
 
 (ert-deftest pi-coding-agent-test-agent-end-clears-thinking-marker-buffer ()
   "agent_end should detach thinking markers and clear thinking stream state."
@@ -4662,96 +5587,98 @@ Inner backtick fences in read output must not affect later wrappers."
 
 (ert-deftest pi-coding-agent-test-thinking-markdown-after-collapsed-read ()
   "Thinking markdown remains styled after a collapsed read tool block."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (let ((long-content
-           (string-join
-            (mapcar (lambda (n) (format "line %03d" n))
-                    (number-sequence 1 140))
-            "\n")))
-      (pi-coding-agent--display-tool-start
-       "read" '(:path "/tmp/TODO-RPC-enhancements.md"))
-      (pi-coding-agent--display-tool-end
-       "read" '(:path "/tmp/TODO-RPC-enhancements.md")
-       `((:type "text" :text ,long-content))
-       nil nil)
-      (should (string-match-p "\.\.\. ([0-9]+ more lines)" (buffer-string)))
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (let ((long-content
+             (string-join
+              (mapcar (lambda (n) (format "line %03d" n))
+                      (number-sequence 1 140))
+              "\n")))
+        (pi-coding-agent--display-tool-start
+         "read" '(:path "/tmp/TODO-RPC-enhancements.md"))
+        (pi-coding-agent--display-tool-end
+         "read" '(:path "/tmp/TODO-RPC-enhancements.md")
+         `((:type "text" :text ,long-content))
+         nil nil)
+        (should (string-match-p "\.\.\. ([0-9]+ more lines)" (buffer-string)))
 
-      (pi-coding-agent--display-agent-start)
-      (pi-coding-agent--display-thinking-start)
-      (pi-coding-agent--display-thinking-delta
-       "**Reviewing documentation editing guidelines**")
-      (pi-coding-agent--display-thinking-end "")
-      (pi-coding-agent--render-complete-message)
-      (font-lock-ensure (point-min) (point-max))
+        (pi-coding-agent--display-agent-start)
+        (pi-coding-agent--display-thinking-start)
+        (pi-coding-agent--display-thinking-delta
+         "**Reviewing documentation editing guidelines**")
+        (pi-coding-agent--display-thinking-end "")
+        (pi-coding-agent--render-complete-message)
+        (font-lock-ensure (point-min) (point-max))
 
-      (goto-char (point-min))
-      (re-search-forward "Reviewing documentation editing guidelines" nil t)
-      (let* ((review-pos (match-beginning 0))
-             (line-start (line-beginning-position))
-             (star-pos (+ line-start 2))
-             (line-face (get-text-property line-start 'face))
-             (review-face (get-text-property review-pos 'face)))
-        (should (or (eq line-face 'md-ts-block-quote)
-                    (and (listp line-face)
-                         (memq 'md-ts-block-quote line-face))))
-        (should (eq (get-text-property star-pos 'invisible) 'md-ts--markup))
-        (should (or (eq review-face 'bold)
-                    (and (listp review-face)
-                         (memq 'bold review-face))))))))
+        (goto-char (point-min))
+        (re-search-forward "Reviewing documentation editing guidelines" nil t)
+        (let* ((review-pos (match-beginning 0))
+               (line-start (line-beginning-position))
+               (star-pos (+ line-start 2))
+               (line-face (get-text-property line-start 'face))
+               (review-face (get-text-property review-pos 'face)))
+          (should (or (eq line-face 'md-ts-block-quote)
+                      (and (listp line-face)
+                           (memq 'md-ts-block-quote line-face))))
+          (should (eq (get-text-property star-pos 'invisible) 'md-ts--markup))
+          (should (or (eq review-face 'bold)
+                      (and (listp review-face)
+                           (memq 'bold review-face)))))))))
 
 (ert-deftest pi-coding-agent-test-thinking-delta-after-toolcall-start-stays-blockquote ()
   "Thinking markdown stays a blockquote even if toolcall_start arrives first.
 Some providers can interleave content blocks by contentIndex.  A thinking delta
 that arrives after toolcall_start must still render as thinking markdown, not
 as plain tool output."
-  (with-temp-buffer
-    (pi-coding-agent-chat-mode)
-    (pi-coding-agent--handle-display-event '(:type "agent_start"))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_start" :message (:role "assistant")))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_start")))
-    ;; Out-of-order interleave: toolcall starts before thinking text chunk.
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
-       :message (:role "assistant"
-                 :content [(:type "toolCall" :id "call_1" :name "read"
-                            :arguments (:path "/tmp/AGENTS.md"))])))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_delta"
-                               :delta "**Reviewing documentation editing guidelines**")))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_update"
-       :assistantMessageEvent (:type "thinking_end" :content "")))
-    (pi-coding-agent--handle-display-event
-     '(:type "message_end" :message (:role "assistant" :stopReason "toolUse")))
-    (font-lock-ensure (point-min) (point-max))
-    (goto-char (point-min))
-    (re-search-forward "Reviewing documentation editing guidelines" nil t)
-    (let* ((review-pos (match-beginning 0))
-           (line-start (line-beginning-position))
-           (line-face (get-text-property line-start 'face))
-           (review-face (get-text-property review-pos 'face)))
-      (should (string-prefix-p "> "
-                               (buffer-substring-no-properties
-                                line-start (line-end-position))))
-      (should (or (eq line-face 'md-ts-block-quote)
-                  (and (listp line-face)
-                       (memq 'md-ts-block-quote line-face))))
-      ;; With range settings active, the inline parser is scoped to
-      ;; inline nodes.  After a setext heading, bold face may not apply
-      ;; (known limitation: inline nodes depend on tree structure).
-      ;; At minimum, blockquote face should be present on the text.
-      (should (or (eq review-face 'bold)
-                  (and (listp review-face)
-                       (memq 'bold review-face))
-                  (eq review-face 'md-ts-block-quote)
-                  (and (listp review-face)
-                       (memq 'md-ts-block-quote review-face)))))))
+  (let ((pi-coding-agent-thinking-display 'visible))
+    (with-temp-buffer
+      (pi-coding-agent-chat-mode)
+      (pi-coding-agent--handle-display-event '(:type "agent_start"))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_start" :message (:role "assistant")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_start")))
+      ;; Out-of-order interleave: toolcall starts before thinking text chunk.
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "toolcall_start" :contentIndex 0)
+         :message (:role "assistant"
+                   :content [(:type "toolCall" :id "call_1" :name "read"
+                              :arguments (:path "/tmp/AGENTS.md"))])))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_delta"
+                                 :delta "**Reviewing documentation editing guidelines**")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_update"
+         :assistantMessageEvent (:type "thinking_end" :content "")))
+      (pi-coding-agent--handle-display-event
+       '(:type "message_end" :message (:role "assistant" :stopReason "toolUse")))
+      (font-lock-ensure (point-min) (point-max))
+      (goto-char (point-min))
+      (re-search-forward "Reviewing documentation editing guidelines" nil t)
+      (let* ((review-pos (match-beginning 0))
+             (line-start (line-beginning-position))
+             (line-face (get-text-property line-start 'face))
+             (review-face (get-text-property review-pos 'face)))
+        (should (string-prefix-p "> "
+                                 (buffer-substring-no-properties
+                                  line-start (line-end-position))))
+        (should (or (eq line-face 'md-ts-block-quote)
+                    (and (listp line-face)
+                         (memq 'md-ts-block-quote line-face))))
+        ;; With range settings active, the inline parser is scoped to
+        ;; inline nodes.  After a setext heading, bold face may not apply
+        ;; (known limitation: inline nodes depend on tree structure).
+        ;; At minimum, blockquote face should be present on the text.
+        (should (or (eq review-face 'bold)
+                    (and (listp review-face)
+                         (memq 'bold review-face))
+                    (eq review-face 'md-ts-block-quote)
+                    (and (listp review-face)
+                         (memq 'md-ts-block-quote review-face))))))))
 
 (ert-deftest pi-coding-agent-test-write-tool-gets-syntax-highlighting ()
   "Write tool displays content from args with syntax highlighting.
